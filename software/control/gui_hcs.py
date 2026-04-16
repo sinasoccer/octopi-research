@@ -97,6 +97,7 @@ class OctopiGUI(QMainWindow):
         self.napari_connections = {}
 
         self.loadObjects(is_simulation)
+        self.slideScanWorkflowEnabled = IS_HCS and WELLPLATE_FORMAT == 0
 
         self.setupHardware()
 
@@ -390,7 +391,15 @@ class OctopiGUI(QMainWindow):
                 include_camera_auto_wb_setting=True,
                 whiteBalanceController=self.whiteBalanceController,
             )
-        self.liveControlWidget = widgets.LiveControlWidget(self.streamHandler, self.liveController, self.configurationManager, show_display_options=True, show_autolevel=True, autolevel=True)
+        self.liveControlWidget = widgets.LiveControlWidget(
+            self.streamHandler,
+            self.liveController,
+            self.configurationManager,
+            show_trigger_options=not self.slideScanWorkflowEnabled,
+            show_display_options=not self.slideScanWorkflowEnabled,
+            show_autolevel=not self.slideScanWorkflowEnabled,
+            autolevel=True,
+        )
         self.navigationWidget = widgets.NavigationWidget(self.navigationController, self.slidePositionController, widget_configuration='compact')
         self.navigationBarWidget = widgets.NavigationBarWidget(self.navigationController, self.slidePositionController, add_z_buttons=False)
         self.dacControlWidget = widgets.DACControWidget(self.microcontroller)
@@ -430,7 +439,13 @@ class OctopiGUI(QMainWindow):
                 self.imageDisplayWindow = core.ImageDisplayWindow(self.liveController, self.contrastManager, draw_crosshairs=True)
                 self.imageDisplayWindow.show_ROI_selector()
             else:
-                self.imageDisplayWindow = core.ImageDisplayWindow(self.liveController, self.contrastManager, draw_crosshairs=True, show_LUT=True, autoLevels=True)
+                self.imageDisplayWindow = core.ImageDisplayWindow(
+                    self.liveController,
+                    self.contrastManager,
+                    draw_crosshairs=True,
+                    show_LUT=not self.slideScanWorkflowEnabled,
+                    autoLevels=True,
+                )
             #self.imageDisplayTabs.addTab(self.imageDisplayWindow.widget, "Live View")
             self.imageDisplayTabs = self.imageDisplayWindow.widget
             self.napariMosaicDisplayWidget = None
@@ -455,16 +470,27 @@ class OctopiGUI(QMainWindow):
         )
         self.sampleSettingsWidget = widgets.SampleSettingsWidget(self.objectivesWidget, self.wellplateFormatWidget)
 
+        if self.slideScanWorkflowEnabled:
+            self.slideScanQuickActionsWidget = widgets.SlideScanQuickActionsWidget(
+                getattr(self.cameraSettingWidget, 'softwareWhiteBalanceWidget', None),
+                self.autofocusController,
+            )
+            self.slideScanAcquisitionWidget = widgets.SlideScanAcquisitionWidget(
+                self.sampleSettingsWidget,
+                self.multiPointWidgetGrid,
+            )
+
         if ENABLE_TRACKING:
             self.trackingControlWidget = widgets.TrackingControllerWidget(self.trackingController, self.configurationManager, show_configurations=TRACKING_SHOW_MICROSCOPE_CONFIGURATIONS)
         if ENABLE_STITCHER:
             self.stitcherWidget = widgets.StitcherWidget(self.configurationManager, self.contrastManager)
 
-        self.recordTabWidget = QTabWidget()
-        self.setupRecordTabWidget()
+        if not self.slideScanWorkflowEnabled:
+            self.recordTabWidget = QTabWidget()
+            self.setupRecordTabWidget()
 
-        self.cameraTabWidget = QTabWidget()
-        self.setupCameraTabWidget()
+            self.cameraTabWidget = QTabWidget()
+            self.setupCameraTabWidget()
 
     def setupImageDisplayTabs(self):
         if USE_NAPARI_FOR_LIVE_VIEW:
@@ -475,7 +501,13 @@ class OctopiGUI(QMainWindow):
                 self.imageDisplayWindow = core.ImageDisplayWindow(self.liveController, self.contrastManager, draw_crosshairs=True)
                 self.imageDisplayWindow.show_ROI_selector()
             else:
-                self.imageDisplayWindow = core.ImageDisplayWindow(self.liveController, self.contrastManager, draw_crosshairs=True, show_LUT=True, autoLevels=True)
+                self.imageDisplayWindow = core.ImageDisplayWindow(
+                    self.liveController,
+                    self.contrastManager,
+                    draw_crosshairs=True,
+                    show_LUT=not self.slideScanWorkflowEnabled,
+                    autoLevels=True,
+                )
             self.imageDisplayTabs.addTab(self.imageDisplayWindow.widget, "Live View")
 
         if not self.live_only_mode:
@@ -561,6 +593,62 @@ class OctopiGUI(QMainWindow):
         self.resizeCurrentTab(self.cameraTabWidget)
 
     def setupLayout(self):
+        if self.slideScanWorkflowEnabled:
+            layout = QVBoxLayout()
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(10)
+
+            header = QLabel("Slide Scan Workflow")
+            header.setStyleSheet("font-size: 17px; font-weight: 600;")
+            subtitle = QLabel(
+                "Live image and slide map stay visible while capture, focus, white balance, and scan setup live in one workflow column."
+            )
+            subtitle.setWordWrap(True)
+            subtitle.setStyleSheet("color: #58606B;")
+
+            quick_group = QGroupBox("Live Capture")
+            quick_layout = QVBoxLayout()
+            quick_layout.addWidget(self.liveControlWidget)
+            quick_group.setLayout(quick_layout)
+
+            actions_group = QGroupBox("Quick Actions")
+            actions_layout = QVBoxLayout()
+            actions_layout.addWidget(self.slideScanQuickActionsWidget)
+            actions_group.setLayout(actions_layout)
+
+            stage_group = QGroupBox("Stage Position")
+            stage_layout = QVBoxLayout()
+            stage_layout.addWidget(self.navigationWidget)
+            stage_group.setLayout(stage_layout)
+
+            advanced_camera_group = widgets.CollapsibleGroupBox("Advanced Camera Settings")
+            advanced_camera_group.setChecked(False)
+            advanced_camera_group.content.addWidget(self.cameraSettingWidget)
+
+            advanced_focus_group = widgets.CollapsibleGroupBox("Advanced Focus Settings")
+            advanced_focus_group.setChecked(False)
+            advanced_focus_group.content.addWidget(self.autofocusWidget)
+
+            layout.addWidget(header)
+            layout.addWidget(subtitle)
+            layout.addWidget(quick_group)
+            layout.addWidget(actions_group)
+            layout.addWidget(stage_group)
+            layout.addWidget(self.slideScanAcquisitionWidget)
+            layout.addWidget(advanced_camera_group)
+            layout.addWidget(advanced_focus_group)
+            layout.addStretch(1)
+
+            self.centralWidget = QWidget()
+            self.centralWidget.setLayout(layout)
+            self.centralWidget.setMinimumWidth(460)
+
+            if SINGLE_WINDOW:
+                self.setupSingleWindowSlideScanLayout()
+            else:
+                self.setCentralWidget(self.centralWidget)
+            return
+
         layout = QVBoxLayout()
 
         if USE_NAPARI_FOR_LIVE_CONTROL and not self.live_only_mode:
@@ -598,6 +686,51 @@ class OctopiGUI(QMainWindow):
             self.setupSingleWindowLayout()
         else:
             self.setupMultiWindowLayout()
+
+    def setupSingleWindowSlideScanLayout(self):
+        main_splitter = QSplitter(Qt.Horizontal)
+        left_splitter = QSplitter(Qt.Vertical)
+
+        live_group = QGroupBox("Live View")
+        live_layout = QVBoxLayout()
+        if SHOW_NAVIGATION_BAR:
+            live_layout.addWidget(self.navigationBarWidget)
+        live_widget = self.imageDisplayWindow.widget if hasattr(self, 'imageDisplayWindow') else self.imageDisplayTabs
+        live_layout.addWidget(live_widget)
+        live_group.setLayout(live_layout)
+
+        map_group = QGroupBox("Slide Map")
+        map_layout = QVBoxLayout()
+        map_hint = QLabel("Red shows the current field. Amber shows the planned scan area.")
+        map_hint.setWordWrap(True)
+        map_hint.setStyleSheet("color: #58606B;")
+        map_layout.addWidget(map_hint)
+        map_layout.addWidget(self.navigationViewer)
+        map_group.setLayout(map_layout)
+        self.navigationViewer.setMinimumHeight(280)
+
+        left_splitter.addWidget(live_group)
+        left_splitter.addWidget(map_group)
+        left_splitter.setStretchFactor(0, 5)
+        left_splitter.setStretchFactor(1, 3)
+
+        workflow_scroll = QScrollArea()
+        workflow_scroll.setWidgetResizable(True)
+        workflow_scroll.setFrameShape(QFrame.NoFrame)
+        workflow_scroll.setWidget(self.centralWidget)
+
+        main_splitter.addWidget(left_splitter)
+        main_splitter.addWidget(workflow_scroll)
+        main_splitter.setStretchFactor(0, 5)
+        main_splitter.setStretchFactor(1, 2)
+        main_splitter.setSizes([1200, 520])
+
+        self.setCentralWidget(main_splitter)
+
+        desktopWidget = QDesktopWidget()
+        height_min = 0.9 * desktopWidget.height()
+        width_min = 0.96 * desktopWidget.width()
+        self.setMinimumSize(int(width_min), int(height_min))
 
     def setupSingleWindowLayout(self):
         main_dockArea = dock.DockArea()
@@ -701,8 +834,9 @@ class OctopiGUI(QMainWindow):
         self.multipointController.signal_z_piezo_um.connect(self.piezoWidget.update_displacement_um_display)
         self.multiPointWidgetGrid.signal_z_stacking.connect(self.multipointController.set_z_stacking_config)
 
-        self.recordTabWidget.currentChanged.connect(self.onTabChanged)
-        if not self.live_only_mode:
+        if not self.slideScanWorkflowEnabled:
+            self.recordTabWidget.currentChanged.connect(self.onTabChanged)
+        if not self.live_only_mode and not self.slideScanWorkflowEnabled:
             self.imageDisplayTabs.currentChanged.connect(self.onDisplayTabChanged)
 
         if USE_NAPARI_FOR_LIVE_VIEW and not self.live_only_mode:
@@ -993,7 +1127,7 @@ class OctopiGUI(QMainWindow):
         self.scanCoordinates.add_well_selector(self.wellSelectionWidget)
         if USE_NAPARI_WELL_SELECTION and not self.performance_mode and not self.live_only_mode:
             self.napariLiveWidget.replace_well_selector(self.wellSelectionWidget)
-        else:
+        elif hasattr(self, 'dock_wellSelection'):
             self.dock_wellSelection.addWidget(self.wellSelectionWidget)
 
     def connectWellSelectionWidget(self):
@@ -1004,6 +1138,8 @@ class OctopiGUI(QMainWindow):
             self.wellSelectionWidget.signal_wellSelected.connect(self.multiPointWidgetGrid.set_well_coordinates)
 
     def toggleWellSelector(self, show):
+        if not hasattr(self, 'dock_wellSelection'):
+            return
         if USE_NAPARI_WELL_SELECTION and not self.performance_mode and not self.live_only_mode:
             self.napariLiveWidget.toggle_well_selector(show)
         else:
@@ -1012,6 +1148,12 @@ class OctopiGUI(QMainWindow):
 
     def toggleAcquisitionStart(self, acquisition_started):
         self.navigationWidget.toggle_click_to_move(acquisition_started)
+        if self.slideScanWorkflowEnabled:
+            if acquisition_started:
+                self.liveControlWidget.toggle_autolevel(False)
+            self.navigationViewer.on_acquisition_start(acquisition_started)
+            self.multiPointWidgetGrid.display_progress_bar(acquisition_started)
+            return
         current_index = self.recordTabWidget.currentIndex()
         for index in range(self.recordTabWidget.count()):
             self.recordTabWidget.setTabEnabled(index, not acquisition_started or index == current_index)
@@ -1035,10 +1177,11 @@ class OctopiGUI(QMainWindow):
             self.stitcherWidget.hide()
 
     def onStartLive(self):
-        self.imageDisplayTabs.setCurrentIndex(0)
+        if not self.slideScanWorkflowEnabled:
+            self.imageDisplayTabs.setCurrentIndex(0)
 
     def startStitcher(self, acquisition_path):
-        acquisitionWidget = self.recordTabWidget.currentWidget()
+        acquisitionWidget = self.multiPointWidgetGrid if self.slideScanWorkflowEnabled else self.recordTabWidget.currentWidget()
         if acquisitionWidget.checkbox_stitchOutput.isChecked():
             apply_flatfield = self.stitcherWidget.applyFlatfieldCheck.isChecked()
             use_registration = self.stitcherWidget.useRegistrationCheck.isChecked()
@@ -1048,7 +1191,7 @@ class OctopiGUI(QMainWindow):
             output_name = acquisitionWidget.lineEdit_experimentID.text() or "stitched"
             output_format = ".ome.zarr" if self.stitcherWidget.outputFormatCombo.currentText() == "OME-ZARR" else ".ome.tiff"
 
-            stitcher_class = stitcher.CoordinateStitcher if self.recordTabWidget.currentIndex() == self.recordTabWidget.indexOf(self.multiPointWidgetGrid) else stitcher.Stitcher
+            stitcher_class = stitcher.CoordinateStitcher if self.slideScanWorkflowEnabled or self.recordTabWidget.currentIndex() == self.recordTabWidget.indexOf(self.multiPointWidgetGrid) else stitcher.Stitcher
             self.stitcherThread = stitcher_class(
                 input_folder=acquisition_path,
                 output_name=output_name,

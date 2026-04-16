@@ -2258,6 +2258,243 @@ class AutoFocusWidget(QFrame):
         self.btn_autofocus.setChecked(False)
 
 
+class SlideScanQuickActionsWidget(QFrame):
+    def __init__(self, whiteBalanceWidget=None, autofocusController=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.whiteBalanceWidget = whiteBalanceWidget
+        self.autofocusController = autofocusController
+        self.add_components()
+        self.setFrameStyle(QFrame.Panel | QFrame.Raised)
+
+    def add_components(self):
+        self.label_hint = QLabel(
+            "Start live, white-balance a blank background, autofocus, then drag the scan box on the slide map."
+        )
+        self.label_hint.setWordWrap(True)
+        self.label_hint.setStyleSheet("color: #58606B;")
+
+        self.btn_auto_white_balance = QPushButton("Auto White Balance")
+        self.btn_background_roi = QPushButton("Show Background ROI")
+        self.btn_background_roi.setCheckable(True)
+        self.btn_white_balance_roi = QPushButton("White Balance From ROI")
+        self.btn_reset_white_balance = QPushButton("Reset WB")
+        self.btn_autofocus = QPushButton("Autofocus Now")
+
+        for button in (
+            self.btn_auto_white_balance,
+            self.btn_background_roi,
+            self.btn_white_balance_roi,
+            self.btn_reset_white_balance,
+            self.btn_autofocus,
+        ):
+            button.setMinimumHeight(34)
+
+        self.btn_auto_white_balance.clicked.connect(self.auto_white_balance)
+        self.btn_background_roi.toggled.connect(self.toggle_background_roi)
+        self.btn_white_balance_roi.clicked.connect(self.white_balance_from_roi)
+        self.btn_reset_white_balance.clicked.connect(self.reset_white_balance)
+        self.btn_autofocus.clicked.connect(self.run_autofocus)
+
+        button_row = QGridLayout()
+        button_row.addWidget(self.btn_auto_white_balance, 0, 0)
+        button_row.addWidget(self.btn_autofocus, 0, 1)
+        button_row.addWidget(self.btn_background_roi, 1, 0)
+        button_row.addWidget(self.btn_white_balance_roi, 1, 1)
+        button_row.addWidget(self.btn_reset_white_balance, 1, 2)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.label_hint)
+        layout.addLayout(button_row)
+        self.setLayout(layout)
+        self.refresh_state()
+
+    def refresh_state(self):
+        has_wb = self.whiteBalanceWidget is not None
+        has_roi = has_wb and getattr(self.whiteBalanceWidget, "imageDisplayWindow", None) is not None
+
+        self.btn_auto_white_balance.setEnabled(has_wb)
+        self.btn_background_roi.setEnabled(has_roi)
+        self.btn_white_balance_roi.setEnabled(has_roi)
+        self.btn_reset_white_balance.setEnabled(has_wb)
+
+        if has_roi:
+            roi_visible = self.whiteBalanceWidget.imageDisplayWindow.is_roi_selector_visible()
+            self.btn_background_roi.blockSignals(True)
+            self.btn_background_roi.setChecked(roi_visible)
+            self.btn_background_roi.blockSignals(False)
+            self.btn_background_roi.setText("Hide Background ROI" if roi_visible else "Show Background ROI")
+        else:
+            self.btn_background_roi.blockSignals(True)
+            self.btn_background_roi.setChecked(False)
+            self.btn_background_roi.blockSignals(False)
+            self.btn_background_roi.setText("Show Background ROI")
+
+    def auto_white_balance(self):
+        if self.whiteBalanceWidget is None:
+            return
+        self.whiteBalanceWidget.auto_balance()
+        self.whiteBalanceWidget.refresh_from_controller()
+        self.refresh_state()
+
+    def toggle_background_roi(self, checked):
+        if self.whiteBalanceWidget is None:
+            return
+        self.whiteBalanceWidget.toggle_background_roi(checked)
+        self.refresh_state()
+
+    def white_balance_from_roi(self):
+        if self.whiteBalanceWidget is None:
+            return
+        self.whiteBalanceWidget.auto_balance_from_background_roi()
+        self.whiteBalanceWidget.refresh_from_controller()
+        self.refresh_state()
+
+    def reset_white_balance(self):
+        if self.whiteBalanceWidget is None:
+            return
+        self.whiteBalanceWidget.reset_gains()
+        self.refresh_state()
+
+    def run_autofocus(self):
+        if self.autofocusController is None:
+            return
+        self.autofocusController.autofocus(False)
+
+
+class SlideScanAcquisitionWidget(QFrame):
+    def __init__(self, sampleSettingsWidget, scanWidget, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sampleSettingsWidget = sampleSettingsWidget
+        self.scanWidget = scanWidget
+        self.add_components()
+        self.setFrameStyle(QFrame.Panel | QFrame.Raised)
+
+    def add_components(self):
+        self.scanWidget.btn_startAcquisition.setText("Start Scan")
+        self.scanWidget.btn_startAcquisition.setMinimumHeight(52)
+        self.scanWidget.btn_show_scan_planner.setText("Select Scan Area")
+        self.scanWidget.btn_center_scan_planner.setText("Center Area Here")
+        self.scanWidget.checkbox_withAutofocus.setText("Refocus During Scan")
+        self.scanWidget.checkbox_genFocusMap.setText("Use Focus Map")
+        self.scanWidget.checkbox_hybridAutofocus.setText("Hybrid Focus Correction")
+        self.scanWidget.entry_af_interval.setSuffix(" tiles")
+        self.scanWidget.list_configurations.setMaximumHeight(96)
+        self.scanWidget.list_configurations.setMinimumHeight(72)
+
+        title = QLabel("Scan Setup")
+        title.setStyleSheet("font-size: 15px; font-weight: 600;")
+
+        hint = QLabel(
+            "Use the slide map to place the scan area, then press Start Scan."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #58606B;")
+
+        saving_row = QHBoxLayout()
+        saving_row.addWidget(QLabel("Saving Path"))
+        saving_row.addWidget(self.scanWidget.lineEdit_savingDir, 1)
+        saving_row.addWidget(self.scanWidget.btn_setSavingDir)
+
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("Preset"))
+        preset_row.addWidget(self.scanWidget.dropdown_presets, 1)
+        preset_row.addWidget(self.scanWidget.btn_load_preset)
+        preset_row.addWidget(self.scanWidget.entry_preset_name, 1)
+        preset_row.addWidget(self.scanWidget.btn_save_preset)
+        preset_row.addWidget(self.scanWidget.btn_delete_preset)
+
+        meta_row = QHBoxLayout()
+        meta_row.addWidget(QLabel("Experiment"))
+        meta_row.addWidget(self.scanWidget.lineEdit_experimentID, 1)
+        meta_row.addWidget(QLabel("Stain"))
+        meta_row.addWidget(self.scanWidget.entry_stain, 1)
+
+        geometry_row = QHBoxLayout()
+        geometry_row.addWidget(QLabel("Scan Size"))
+        geometry_row.addWidget(self.scanWidget.entry_scan_size)
+        geometry_row.addWidget(QLabel("Overlap"))
+        geometry_row.addWidget(self.scanWidget.entry_overlap)
+        geometry_row.addWidget(QLabel("Shape"))
+        geometry_row.addWidget(self.scanWidget.combobox_shape)
+
+        planner_row = QHBoxLayout()
+        planner_row.addWidget(QLabel("Region Path"))
+        planner_row.addWidget(self.scanWidget.dropdown_region_path)
+        planner_row.addWidget(QLabel("Tile Path"))
+        planner_row.addWidget(self.scanWidget.dropdown_tile_path)
+        planner_row.addStretch(1)
+        planner_row.addWidget(self.scanWidget.btn_show_scan_planner)
+        planner_row.addWidget(self.scanWidget.btn_center_scan_planner)
+
+        autofocus_row = QHBoxLayout()
+        autofocus_row.addWidget(self.scanWidget.checkbox_withAutofocus)
+        autofocus_row.addWidget(QLabel("AF Every"))
+        autofocus_row.addWidget(self.scanWidget.entry_af_interval)
+        autofocus_row.addSpacing(8)
+        autofocus_row.addWidget(self.scanWidget.checkbox_genFocusMap)
+        autofocus_row.addWidget(self.scanWidget.checkbox_hybridAutofocus)
+        autofocus_row.addStretch(1)
+
+        channels_group = QGroupBox("Scan Channels")
+        channels_layout = QVBoxLayout()
+        channels_layout.addWidget(self.scanWidget.list_configurations)
+        channels_group.setLayout(channels_layout)
+
+        progress_row = QHBoxLayout()
+        progress_row.addWidget(self.scanWidget.progress_label)
+        progress_row.addWidget(self.scanWidget.progress_bar, 1)
+        progress_row.addWidget(self.scanWidget.eta_label)
+
+        start_row = QHBoxLayout()
+        start_row.addStretch(1)
+        start_row.addWidget(self.scanWidget.btn_startAcquisition)
+
+        advanced_group = CollapsibleGroupBox("Advanced Scan Settings")
+        advanced_group.setChecked(False)
+        advanced_group.content.addWidget(self.scanWidget.checkbox_withReflectionAutofocus)
+        if ENABLE_OBJECTIVE_PIEZO:
+            advanced_group.content.addWidget(self.scanWidget.checkbox_usePiezo)
+        advanced_group.content.addWidget(self.scanWidget.checkbox_set_z_range)
+
+        z_row = QHBoxLayout()
+        z_row.addWidget(self.scanWidget.set_minZ_button)
+        z_row.addWidget(QLabel("Z-min"))
+        z_row.addWidget(self.scanWidget.entry_minZ)
+        z_row.addWidget(self.scanWidget.set_maxZ_button)
+        z_row.addWidget(QLabel("Z-max"))
+        z_row.addWidget(self.scanWidget.entry_maxZ)
+        advanced_group.content.addLayout(z_row)
+
+        zstack_row = QHBoxLayout()
+        zstack_row.addWidget(QLabel("dz"))
+        zstack_row.addWidget(self.scanWidget.entry_deltaZ)
+        zstack_row.addWidget(QLabel("Nz"))
+        zstack_row.addWidget(self.scanWidget.entry_NZ)
+        zstack_row.addWidget(QLabel("dt"))
+        zstack_row.addWidget(self.scanWidget.entry_dt)
+        zstack_row.addWidget(QLabel("Nt"))
+        zstack_row.addWidget(self.scanWidget.entry_Nt)
+        advanced_group.content.addLayout(zstack_row)
+
+        if ENABLE_STITCHER:
+            advanced_group.content.addWidget(self.scanWidget.checkbox_stitchOutput)
+
+        layout = QVBoxLayout()
+        layout.addWidget(title)
+        layout.addWidget(hint)
+        layout.addWidget(self.sampleSettingsWidget)
+        layout.addLayout(saving_row)
+        layout.addLayout(preset_row)
+        layout.addLayout(meta_row)
+        layout.addLayout(geometry_row)
+        layout.addLayout(planner_row)
+        layout.addLayout(autofocus_row)
+        layout.addWidget(channels_group)
+        layout.addLayout(progress_row)
+        layout.addLayout(start_row)
+        layout.addWidget(advanced_group)
+        self.setLayout(layout)
+
 class FilterControllerWidget(QFrame):
     def __init__(self, filterController, liveController, main=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
