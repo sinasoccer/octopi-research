@@ -221,7 +221,17 @@ class OctopiGUI(QMainWindow):
             self.imageDisplayTabs.addTab(self.napariMosaicDisplayWidget, "Mosaic View")
 
         self.multiPointWidget = widgets.MultiPointWidget(self.multipointController,self.configurationManager)
-        self.multiPointWidgetGrid = widgets.MultiPointWidgetGrid(self.navigationController, self.navigationViewer, self.multipointController, self.objectiveStore, self.configurationManager, self.scanCoordinates, self.napariMosaicDisplayWidget)
+        self.multiPointWidgetGrid = widgets.MultiPointWidgetGrid(
+            self.navigationController,
+            self.navigationViewer,
+            self.multipointController,
+            self.objectiveStore,
+            self.configurationManager,
+            self.scanCoordinates,
+            self.napariMosaicDisplayWidget,
+            objectivesWidget=self.objectivesWidget,
+            cameraSettingsWidget=self.cameraSettingWidget,
+        )
 
         self.recordTabWidget = QTabWidget()
         self.recordTabWidget.addTab(self.multiPointWidget, "Multipoint Acquisition")

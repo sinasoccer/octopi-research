@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 
 # set QT_API environment variable
 os.environ["QT_API"] = "pyqt5"
@@ -60,6 +61,69 @@ class CollapsibleGroupBox(QGroupBox):
         self.content_widget.setVisible(state)
 
 
+class SmearScanPresetStore:
+    def __init__(self, base_dir='cache/smear_scan_presets'):
+        self.base_dir = base_dir
+        os.makedirs(self.base_dir, exist_ok=True)
+
+    def _sanitize_name(self, name):
+        sanitized = re.sub(r'[^A-Za-z0-9._-]+', '_', name.strip())
+        sanitized = sanitized.strip('._')
+        return sanitized or 'preset'
+
+    def _preset_path(self, preset_name):
+        return os.path.join(self.base_dir, f'{self._sanitize_name(preset_name)}.json')
+
+    def _flatfield_path(self, preset_name):
+        return os.path.join(self.base_dir, f'{self._sanitize_name(preset_name)}_flatfield.npz')
+
+    def list_presets(self):
+        preset_names = []
+        for file_name in sorted(os.listdir(self.base_dir)):
+            if not file_name.endswith('.json'):
+                continue
+            preset_path = os.path.join(self.base_dir, file_name)
+            try:
+                with open(preset_path, 'r') as handle:
+                    preset = json.load(handle)
+                preset_names.append(preset.get('preset_name', os.path.splitext(file_name)[0]))
+            except (OSError, ValueError, TypeError):
+                continue
+        return preset_names
+
+    def save_preset(self, preset_name, preset_data, whiteBalanceController=None):
+        payload = dict(preset_data)
+        payload['preset_name'] = preset_name
+
+        flatfield_path = self._flatfield_path(preset_name)
+        if whiteBalanceController is not None:
+            payload['image_corrections'] = whiteBalanceController.export_profile(flatfield_path=flatfield_path)
+        else:
+            try:
+                if os.path.exists(flatfield_path):
+                    os.remove(flatfield_path)
+            except OSError:
+                pass
+
+        with open(self._preset_path(preset_name), 'w') as handle:
+            json.dump(payload, handle, indent=2)
+
+    def load_preset(self, preset_name):
+        with open(self._preset_path(preset_name), 'r') as handle:
+            payload = json.load(handle)
+
+        payload['_flatfield_path'] = self._flatfield_path(preset_name)
+        return payload
+
+    def delete_preset(self, preset_name):
+        for path in (self._preset_path(preset_name), self._flatfield_path(preset_name)):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
+
 class SoftwareWhiteBalanceWidget(QFrame):
     def __init__(self, whiteBalanceController, main=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -86,6 +150,20 @@ class SoftwareWhiteBalanceWidget(QFrame):
         self.btn_reset = QPushButton("Reset")
         self.btn_reset.clicked.connect(self.reset_gains)
 
+        self.checkbox_flatfield_enable = QCheckBox("Enable Flat-Field Correction")
+        self.checkbox_flatfield_enable.toggled.connect(self.toggle_flatfield_enabled)
+
+        self.btn_capture_flatfield = QPushButton("Capture Flatfield From Current Frame")
+        self.btn_capture_flatfield.clicked.connect(self.capture_flatfield)
+
+        self.btn_capture_flatfield_roi = QPushButton("Capture Flatfield From Background ROI")
+        self.btn_capture_flatfield_roi.clicked.connect(self.capture_flatfield_from_roi)
+
+        self.btn_clear_flatfield = QPushButton("Clear Flatfield")
+        self.btn_clear_flatfield.clicked.connect(self.clear_flatfield)
+
+        self.label_flatfield_status = QLabel("Flatfield: none")
+
         self.entry_gain_r = self._build_gain_spinbox()
         self.entry_gain_g = self._build_gain_spinbox()
         self.entry_gain_b = self._build_gain_spinbox()
@@ -110,9 +188,18 @@ class SoftwareWhiteBalanceWidget(QFrame):
         gains_row.addWidget(QLabel("B Gain"))
         gains_row.addWidget(self.entry_gain_b)
 
+        flatfield_row = QHBoxLayout()
+        flatfield_row.addWidget(self.checkbox_flatfield_enable)
+        flatfield_row.addStretch()
+        flatfield_row.addWidget(self.btn_capture_flatfield)
+        flatfield_row.addWidget(self.btn_capture_flatfield_roi)
+        flatfield_row.addWidget(self.btn_clear_flatfield)
+        flatfield_row.addWidget(self.label_flatfield_status)
+
         layout = QVBoxLayout()
         layout.addLayout(top_row)
         layout.addLayout(gains_row)
+        layout.addLayout(flatfield_row)
         self.setLayout(layout)
         self._sync_background_roi_controls()
 
@@ -126,6 +213,8 @@ class SoftwareWhiteBalanceWidget(QFrame):
     def refresh_from_controller(self):
         enabled = self.whiteBalanceController.is_enabled()
         gains = self.whiteBalanceController.get_gains()
+        flatfield_enabled = self.whiteBalanceController.is_flatfield_enabled()
+        has_flatfield = self.whiteBalanceController.has_flatfield_reference()
 
         for widget, value in (
             (self.entry_gain_r, gains[0]),
@@ -139,6 +228,17 @@ class SoftwareWhiteBalanceWidget(QFrame):
         self.checkbox_enable.blockSignals(True)
         self.checkbox_enable.setChecked(enabled)
         self.checkbox_enable.blockSignals(False)
+
+        self.checkbox_flatfield_enable.blockSignals(True)
+        self.checkbox_flatfield_enable.setChecked(flatfield_enabled)
+        self.checkbox_flatfield_enable.blockSignals(False)
+
+        self.checkbox_flatfield_enable.setEnabled(has_flatfield)
+        self.btn_clear_flatfield.setEnabled(has_flatfield)
+        if has_flatfield:
+            self.label_flatfield_status.setText("Flatfield: active" if flatfield_enabled else "Flatfield: saved")
+        else:
+            self.label_flatfield_status.setText("Flatfield: none")
 
         if self.imageDisplayWindow is not None:
             self.btn_toggle_background_roi.setText(
@@ -160,6 +260,7 @@ class SoftwareWhiteBalanceWidget(QFrame):
         has_display_window = self.imageDisplayWindow is not None
         self.btn_toggle_background_roi.setEnabled(has_display_window)
         self.btn_auto_background.setEnabled(has_display_window)
+        self.btn_capture_flatfield_roi.setEnabled(has_display_window)
         if not has_display_window:
             self.btn_toggle_background_roi.blockSignals(True)
             self.btn_toggle_background_roi.setChecked(False)
@@ -217,6 +318,48 @@ class SoftwareWhiteBalanceWidget(QFrame):
 
     def reset_gains(self):
         self.whiteBalanceController.reset()
+        self.refresh_from_controller()
+
+    def toggle_flatfield_enabled(self, checked):
+        self.whiteBalanceController.set_flatfield_enabled(checked)
+        self.refresh_from_controller()
+
+    def capture_flatfield(self):
+        success = self.whiteBalanceController.capture_flatfield_from_current_frame()
+        if not success:
+            QMessageBox.information(
+                self,
+                "Flat-Field Correction",
+                "No frame is available yet. Start live view and place a blank background field on screen first.",
+            )
+            return
+
+        self.refresh_from_controller()
+
+    def capture_flatfield_from_roi(self):
+        if self.imageDisplayWindow is None:
+            QMessageBox.information(
+                self,
+                "Flat-Field Correction",
+                "Background-ROI flatfield capture is only available in the standard image viewer.",
+            )
+            return
+
+        success = self.whiteBalanceController.capture_flatfield_from_background_roi(
+            self.imageDisplayWindow.get_roi_bounding_box()
+        )
+        if not success:
+            QMessageBox.information(
+                self,
+                "Flat-Field Correction",
+                "No frame is available yet, or the ROI is empty. Start live view and place the ROI over a blank background region first.",
+            )
+            return
+
+        self.refresh_from_controller()
+
+    def clear_flatfield(self):
+        self.whiteBalanceController.clear_flatfield()
         self.refresh_from_controller()
 
 
@@ -2654,12 +2797,22 @@ class MultiPointWidget2(QFrame):
         self.checkbox_withAutofocus.setChecked(MULTIPOINT_CONTRAST_AUTOFOCUS_ENABLE_BY_DEFAULT)
         self.multipointController.set_af_flag(MULTIPOINT_CONTRAST_AUTOFOCUS_ENABLE_BY_DEFAULT)
 
+        self.entry_af_interval = QSpinBox()
+        self.entry_af_interval.setRange(1, 1000)
+        self.entry_af_interval.setValue(MULTIPOINT_AUTOFOCUS_INTERVAL)
+        self.entry_af_interval.setSuffix(' fields')
+        self.multipointController.set_af_interval(MULTIPOINT_AUTOFOCUS_INTERVAL)
+
         self.checkbox_withReflectionAutofocus = QCheckBox('Reflection AF')
         self.checkbox_withReflectionAutofocus.setChecked(MULTIPOINT_REFLECTION_AUTOFOCUS_ENABLE_BY_DEFAULT)
         self.multipointController.set_reflection_af_flag(MULTIPOINT_REFLECTION_AUTOFOCUS_ENABLE_BY_DEFAULT)
 
         self.checkbox_genFocusMap = QCheckBox('Focus Map')
         self.checkbox_genFocusMap.setChecked(False)
+
+        self.checkbox_hybridAutofocus = QCheckBox('Hybrid AF')
+        self.checkbox_hybridAutofocus.setChecked(MULTIPOINT_HYBRID_AUTOFOCUS_ENABLE_BY_DEFAULT)
+        self.multipointController.set_hybrid_focus_flag(MULTIPOINT_HYBRID_AUTOFOCUS_ENABLE_BY_DEFAULT)
 
         self.checkbox_usePiezo = QCheckBox('Piezo Z-Stack')
         self.checkbox_usePiezo.setChecked(MULTIPOINT_USE_PIEZO_FOR_ZSTACKS)
@@ -2771,9 +2924,14 @@ class MultiPointWidget2(QFrame):
 
         grid_af = QVBoxLayout()
         grid_af.addWidget(self.checkbox_withAutofocus)
+        af_interval_layout = QHBoxLayout()
+        af_interval_layout.addWidget(QLabel('AF Every'))
+        af_interval_layout.addWidget(self.entry_af_interval)
+        grid_af.addLayout(af_interval_layout)
         if SUPPORT_LASER_AUTOFOCUS:
             grid_af.addWidget(self.checkbox_withReflectionAutofocus)
         grid_af.addWidget(self.checkbox_genFocusMap)
+        grid_af.addWidget(self.checkbox_hybridAutofocus)
         if ENABLE_OBJECTIVE_PIEZO:
             grid_af.addWidget(self.checkbox_usePiezo)
         grid_af.addWidget(self.checkbox_set_z_range)
@@ -2817,7 +2975,9 @@ class MultiPointWidget2(QFrame):
         self.entry_Nt.valueChanged.connect(self.multipointController.set_Nt)
         self.checkbox_genFocusMap.toggled.connect(self.multipointController.set_gen_focus_map_flag)
         self.checkbox_withAutofocus.toggled.connect(self.multipointController.set_af_flag)
+        self.entry_af_interval.valueChanged.connect(self.multipointController.set_af_interval)
         self.checkbox_withReflectionAutofocus.toggled.connect(self.multipointController.set_reflection_af_flag)
+        self.checkbox_hybridAutofocus.toggled.connect(self.multipointController.set_hybrid_focus_flag)
         self.checkbox_usePiezo.toggled.connect(self.multipointController.set_use_piezo)
         self.checkbox_stitchOutput.toggled.connect(self.display_stitcher_widget)
         self.btn_setSavingDir.clicked.connect(self.set_saving_dir)
@@ -3078,7 +3238,9 @@ class MultiPointWidget2(QFrame):
             self.multipointController.set_Nt(self.entry_Nt.value())
             self.multipointController.set_use_piezo(self.checkbox_usePiezo.isChecked())
             self.multipointController.set_af_flag(self.checkbox_withAutofocus.isChecked())
+            self.multipointController.set_af_interval(self.entry_af_interval.value())
             self.multipointController.set_reflection_af_flag(self.checkbox_withReflectionAutofocus.isChecked())
+            self.multipointController.set_hybrid_focus_flag(self.checkbox_hybridAutofocus.isChecked())
             self.multipointController.set_base_path(self.lineEdit_savingDir.text())
             self.multipointController.set_selected_configurations((item.text() for item in self.list_configurations.selectedItems()))
             self.multipointController.start_new_experiment(self.lineEdit_experimentID.text())
@@ -3151,7 +3313,9 @@ class MultiPointWidget2(QFrame):
         self.list_configurations.setEnabled(enabled)
         self.checkbox_genFocusMap.setEnabled(enabled)
         self.checkbox_withAutofocus.setEnabled(enabled)
+        self.entry_af_interval.setEnabled(enabled)
         self.checkbox_withReflectionAutofocus.setEnabled(enabled)
+        self.checkbox_hybridAutofocus.setEnabled(enabled)
         self.checkbox_stitchOutput.setEnabled(enabled)
         if exclude_btn_startAcquisition is not True:
             self.btn_startAcquisition.setEnabled(enabled)
@@ -3361,7 +3525,20 @@ class MultiPointWidgetGrid(QFrame):
     signal_z_stacking = Signal(int)
     signal_draw_shape = Signal(bool)
 
-    def __init__(self, navigationController, navigationViewer, multipointController, objectiveStore, configurationManager, scanCoordinates, napariMosaicWidget=None, *args, **kwargs):
+    def __init__(
+        self,
+        navigationController,
+        navigationViewer,
+        multipointController,
+        objectiveStore,
+        configurationManager,
+        scanCoordinates,
+        napariMosaicWidget=None,
+        objectivesWidget=None,
+        cameraSettingsWidget=None,
+        *args,
+        **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.objectiveStore = objectiveStore
         self.multipointController = multipointController
@@ -3369,6 +3546,8 @@ class MultiPointWidgetGrid(QFrame):
         self.navigationViewer = navigationViewer
         self.scanCoordinates = scanCoordinates
         self.configurationManager = configurationManager
+        self.objectivesWidget = objectivesWidget
+        self.cameraSettingsWidget = cameraSettingsWidget
         if napariMosaicWidget is None:
             self.performance_mode = True
         else:
@@ -3383,8 +3562,11 @@ class MultiPointWidgetGrid(QFrame):
         self.region_coordinates = {}
         self.region_fov_coordinates_dict = {}
         self.acquisition_start_time = None
-        self.manual_shape = None
+        self.manual_shapes = None
+        self.scan_planner_active = False
+        self.scan_planner_bounds_mm = None
         self.eta_seconds = 0
+        self.presetStore = SmearScanPresetStore()
         self.add_components()
         self.setFrameStyle(QFrame.Panel | QFrame.Raised)
         self.set_default_scan_size()
@@ -3408,6 +3590,16 @@ class MultiPointWidgetGrid(QFrame):
         self.base_path_is_set = True
 
         self.lineEdit_experimentID = QLineEdit()
+        self.entry_stain = QLineEdit()
+        self.entry_stain.setPlaceholderText("Wright-Giemsa, Diff-Quik, etc.")
+
+        self.entry_preset_name = QLineEdit()
+        self.entry_preset_name.setPlaceholderText("Preset name")
+        self.dropdown_presets = QComboBox()
+        self.dropdown_presets.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_load_preset = QPushButton("Load Preset")
+        self.btn_save_preset = QPushButton("Save Preset")
+        self.btn_delete_preset = QPushButton("Delete")
 
         # Update scan size entry
         self.entry_scan_size = QDoubleSpinBox()
@@ -3494,6 +3686,17 @@ class MultiPointWidgetGrid(QFrame):
         self.combobox_shape.setFixedWidth(btn_width)
         #self.combobox_shape.currentTextChanged.connect(self.on_shape_changed)
 
+        self.dropdown_region_path = QComboBox()
+        self.dropdown_region_path.addItems(['S-Pattern', 'Unidirectional'])
+        self.dropdown_region_path.setCurrentText(self.acquisition_pattern)
+        self.dropdown_tile_path = QComboBox()
+        self.dropdown_tile_path.addItems(['S-Pattern', 'Unidirectional'])
+        self.dropdown_tile_path.setCurrentText(self.fov_pattern)
+
+        self.btn_show_scan_planner = QPushButton("Show Scan Box")
+        self.btn_show_scan_planner.setCheckable(True)
+        self.btn_center_scan_planner = QPushButton("Center Box Here")
+
         self.checkbox_genFocusMap = QCheckBox('Focus Map')
         #self.checkbox_genFocusMap = QCheckBox('AF Map')
         self.checkbox_genFocusMap.setChecked(False)
@@ -3502,12 +3705,22 @@ class MultiPointWidgetGrid(QFrame):
         self.checkbox_withAutofocus.setChecked(MULTIPOINT_CONTRAST_AUTOFOCUS_ENABLE_BY_DEFAULT)
         self.multipointController.set_af_flag(MULTIPOINT_CONTRAST_AUTOFOCUS_ENABLE_BY_DEFAULT)
 
+        self.entry_af_interval = QSpinBox()
+        self.entry_af_interval.setRange(1, 1000)
+        self.entry_af_interval.setValue(MULTIPOINT_AUTOFOCUS_INTERVAL)
+        self.entry_af_interval.setSuffix(" fields")
+        self.multipointController.set_af_interval(MULTIPOINT_AUTOFOCUS_INTERVAL)
+
         self.checkbox_withReflectionAutofocus = QCheckBox('Reflection AF')
         self.checkbox_withReflectionAutofocus.setChecked(MULTIPOINT_REFLECTION_AUTOFOCUS_ENABLE_BY_DEFAULT)
         self.multipointController.set_reflection_af_flag(MULTIPOINT_REFLECTION_AUTOFOCUS_ENABLE_BY_DEFAULT)
 
         self.checkbox_usePiezo = QCheckBox('Piezo Z-Stack')
         self.checkbox_usePiezo.setChecked(MULTIPOINT_USE_PIEZO_FOR_ZSTACKS)
+
+        self.checkbox_hybridAutofocus = QCheckBox('Hybrid AF')
+        self.checkbox_hybridAutofocus.setChecked(MULTIPOINT_HYBRID_AUTOFOCUS_ENABLE_BY_DEFAULT)
+        self.multipointController.set_hybrid_focus_flag(MULTIPOINT_HYBRID_AUTOFOCUS_ENABLE_BY_DEFAULT)
 
         self.checkbox_set_z_range = QCheckBox('Set Z-range')
         self.checkbox_set_z_range.toggled.connect(self.toggle_z_range_controls)
@@ -3545,10 +3758,21 @@ class MultiPointWidgetGrid(QFrame):
         saving_path_layout.addWidget(self.btn_setSavingDir)
         main_layout.addLayout(saving_path_layout)
 
-        # Experiment ID and Scan Shape
+        preset_layout = QHBoxLayout()
+        preset_layout.addWidget(QLabel('Preset'))
+        preset_layout.addWidget(self.dropdown_presets)
+        preset_layout.addWidget(self.btn_load_preset)
+        preset_layout.addWidget(self.entry_preset_name)
+        preset_layout.addWidget(self.btn_save_preset)
+        preset_layout.addWidget(self.btn_delete_preset)
+        main_layout.addLayout(preset_layout)
+
+        # Experiment ID, stain, and scan shape
         row_1_layout = QHBoxLayout()
         row_1_layout.addWidget(QLabel('Experiment ID'))
         row_1_layout.addWidget(self.lineEdit_experimentID)
+        row_1_layout.addWidget(QLabel('Stain'))
+        row_1_layout.addWidget(self.entry_stain)
         row_1_layout.addWidget(QLabel('Well Shape'))
         row_1_layout.addWidget(self.combobox_shape)
         main_layout.addLayout(row_1_layout)
@@ -3564,6 +3788,16 @@ class MultiPointWidgetGrid(QFrame):
         row_4_layout.addWidget(QLabel('Well Coverage'))
         row_4_layout.addWidget(self.entry_well_coverage)
         main_layout.addLayout(row_4_layout)
+
+        planner_layout = QHBoxLayout()
+        planner_layout.addWidget(QLabel('Region Path'))
+        planner_layout.addWidget(self.dropdown_region_path)
+        planner_layout.addWidget(QLabel('Tile Path'))
+        planner_layout.addWidget(self.dropdown_tile_path)
+        planner_layout.addStretch(1)
+        planner_layout.addWidget(self.btn_show_scan_planner)
+        planner_layout.addWidget(self.btn_center_scan_planner)
+        main_layout.addLayout(planner_layout)
 
         grid = QGridLayout()
 
@@ -3611,9 +3845,14 @@ class MultiPointWidgetGrid(QFrame):
         # Options and Start button
         options_layout = QVBoxLayout()
         options_layout.addWidget(self.checkbox_withAutofocus)
+        af_interval_layout = QHBoxLayout()
+        af_interval_layout.addWidget(QLabel('AF Every'))
+        af_interval_layout.addWidget(self.entry_af_interval)
+        options_layout.addLayout(af_interval_layout)
         if SUPPORT_LASER_AUTOFOCUS:
             options_layout.addWidget(self.checkbox_withReflectionAutofocus)
         options_layout.addWidget(self.checkbox_genFocusMap)
+        options_layout.addWidget(self.checkbox_hybridAutofocus)
         if ENABLE_OBJECTIVE_PIEZO:
             options_layout.addWidget(self.checkbox_usePiezo)
         options_layout.addWidget(self.checkbox_set_z_range)
@@ -3656,14 +3895,21 @@ class MultiPointWidgetGrid(QFrame):
         self.combobox_shape.currentTextChanged.connect(self.on_set_shape)
         self.entry_scan_size.valueChanged.connect(self.update_coordinates)
         self.entry_overlap.valueChanged.connect(self.update_coordinates)
+        self.dropdown_region_path.currentTextChanged.connect(self.set_acquisition_pattern)
+        self.dropdown_tile_path.currentTextChanged.connect(self.set_fov_pattern)
+        self.btn_show_scan_planner.toggled.connect(self.toggle_scan_planner)
+        self.btn_center_scan_planner.clicked.connect(self.center_scan_planner_on_current_fov)
         self.checkbox_withAutofocus.toggled.connect(self.multipointController.set_af_flag)
+        self.entry_af_interval.valueChanged.connect(self.multipointController.set_af_interval)
         self.checkbox_withReflectionAutofocus.toggled.connect(self.multipointController.set_reflection_af_flag)
         self.checkbox_genFocusMap.toggled.connect(self.multipointController.set_gen_focus_map_flag)
+        self.checkbox_hybridAutofocus.toggled.connect(self.multipointController.set_hybrid_focus_flag)
         self.checkbox_usePiezo.toggled.connect(self.multipointController.set_use_piezo)
         self.checkbox_stitchOutput.toggled.connect(self.display_stitcher_widget)
         self.list_configurations.itemSelectionChanged.connect(self.emit_selected_channels)
         self.navigationViewer.signal_update_live_scan_grid.connect(self.set_live_scan_coordinates)
         self.navigationViewer.signal_update_well_coordinates.connect(self.set_well_coordinates)
+        self.navigationViewer.signal_scan_planner_roi_changed.connect(self.update_scan_planner_roi)
         self.multipointController.acquisitionFinished.connect(self.acquisition_is_finished)
         self.multipointController.signal_acquisition_progress.connect(self.update_acquisition_progress)
         self.multipointController.signal_region_progress.connect(self.update_region_progress)
@@ -3673,11 +3919,208 @@ class MultiPointWidgetGrid(QFrame):
         if not self.performance_mode:
             self.napariMosaicWidget.signal_layers_initialized.connect(self.enable_manual_ROI)
         self.entry_NZ.valueChanged.connect(self.signal_acquisition_z_levels.emit)
+        self.btn_load_preset.clicked.connect(self.load_selected_preset)
+        self.btn_save_preset.clicked.connect(self.save_current_preset)
+        self.btn_delete_preset.clicked.connect(self.delete_selected_preset)
+
+        self.refresh_preset_list()
 
     def enable_manual_ROI(self, enable):
         self.combobox_shape.model().item(2).setEnabled(enable)
         if not enable:
             self.set_default_shape()
+
+    def refresh_preset_list(self, selected_name=None):
+        preset_names = self.presetStore.list_presets()
+        current_name = selected_name or self.dropdown_presets.currentText()
+
+        self.dropdown_presets.blockSignals(True)
+        self.dropdown_presets.clear()
+        self.dropdown_presets.addItems(preset_names)
+        if current_name in preset_names:
+            self.dropdown_presets.setCurrentText(current_name)
+        self.dropdown_presets.blockSignals(False)
+
+    def _refresh_correction_ui(self):
+        if self.cameraSettingsWidget is not None and hasattr(self.cameraSettingsWidget, 'softwareWhiteBalanceWidget'):
+            self.cameraSettingsWidget.softwareWhiteBalanceWidget.refresh_from_controller()
+
+    def _set_selected_channels(self, channels):
+        selected_channels = set(channels or [])
+        for index in range(self.list_configurations.count()):
+            item = self.list_configurations.item(index)
+            item.setSelected(item.text() in selected_channels)
+
+    def _set_objective(self, objective_name):
+        if not objective_name:
+            return
+
+        if self.objectivesWidget is not None:
+            self.objectivesWidget.dropdown.setCurrentText(objective_name)
+        elif objective_name in self.objectiveStore.objectives_dict:
+            self.objectiveStore.set_current_objective(objective_name)
+            self.navigationViewer.on_objective_changed()
+
+    def collect_preset_data(self):
+        return {
+            'stain': self.entry_stain.text().strip(),
+            'objective': self.objectiveStore.current_objective,
+            'scan_size_mm': float(self.entry_scan_size.value()),
+            'overlap_percent': float(self.entry_overlap.value()),
+            'shape': self.combobox_shape.currentText(),
+            'region_path': self.dropdown_region_path.currentText(),
+            'tile_path': self.dropdown_tile_path.currentText(),
+            'delta_z_um': float(self.entry_deltaZ.value()),
+            'num_z_levels': int(self.entry_NZ.value()),
+            'dt_s': float(self.entry_dt.value()),
+            'num_timepoints': int(self.entry_Nt.value()),
+            'set_z_range': bool(self.checkbox_set_z_range.isChecked()),
+            'z_min_um': float(self.entry_minZ.value()),
+            'z_max_um': float(self.entry_maxZ.value()),
+            'z_stack_mode_index': int(self.combobox_z_stack.currentIndex()),
+            'contrast_af': bool(self.checkbox_withAutofocus.isChecked()),
+            'af_interval': int(self.entry_af_interval.value()),
+            'reflection_af': bool(self.checkbox_withReflectionAutofocus.isChecked()),
+            'focus_map': bool(self.checkbox_genFocusMap.isChecked()),
+            'hybrid_focus': bool(self.checkbox_hybridAutofocus.isChecked()),
+            'use_piezo': bool(self.checkbox_usePiezo.isChecked()),
+            'use_coordinate_acquisition': bool(self.checkbox_useCoordinateAcquisition.isChecked()),
+            'selected_channels': [item.text() for item in self.list_configurations.selectedItems()],
+        }
+
+    def apply_preset_data(self, preset_data):
+        self.entry_stain.setText(preset_data.get('stain', ''))
+        self._set_objective(preset_data.get('objective'))
+
+        self.entry_scan_size.setValue(float(preset_data.get('scan_size_mm', self.entry_scan_size.value())))
+        self.entry_overlap.setValue(float(preset_data.get('overlap_percent', self.entry_overlap.value())))
+
+        shape = preset_data.get('shape', self.combobox_shape.currentText())
+        if self.combobox_shape.findText(shape) >= 0:
+            self.combobox_shape.setCurrentText(shape)
+
+        region_path = preset_data.get('region_path', self.dropdown_region_path.currentText())
+        tile_path = preset_data.get('tile_path', self.dropdown_tile_path.currentText())
+        if self.dropdown_region_path.findText(region_path) >= 0:
+            self.dropdown_region_path.setCurrentText(region_path)
+        if self.dropdown_tile_path.findText(tile_path) >= 0:
+            self.dropdown_tile_path.setCurrentText(tile_path)
+
+        self.entry_deltaZ.setValue(float(preset_data.get('delta_z_um', self.entry_deltaZ.value())))
+        self.entry_NZ.setValue(int(preset_data.get('num_z_levels', self.entry_NZ.value())))
+        self.entry_dt.setValue(float(preset_data.get('dt_s', self.entry_dt.value())))
+        self.entry_Nt.setValue(int(preset_data.get('num_timepoints', self.entry_Nt.value())))
+        self.checkbox_set_z_range.setChecked(bool(preset_data.get('set_z_range', self.checkbox_set_z_range.isChecked())))
+        self.entry_minZ.setValue(float(preset_data.get('z_min_um', self.entry_minZ.value())))
+        self.entry_maxZ.setValue(float(preset_data.get('z_max_um', self.entry_maxZ.value())))
+        self.combobox_z_stack.setCurrentIndex(int(preset_data.get('z_stack_mode_index', self.combobox_z_stack.currentIndex())))
+        self.checkbox_withAutofocus.setChecked(bool(preset_data.get('contrast_af', self.checkbox_withAutofocus.isChecked())))
+        self.entry_af_interval.setValue(int(preset_data.get('af_interval', self.entry_af_interval.value())))
+        self.checkbox_withReflectionAutofocus.setChecked(bool(preset_data.get('reflection_af', self.checkbox_withReflectionAutofocus.isChecked())))
+        self.checkbox_genFocusMap.setChecked(bool(preset_data.get('focus_map', self.checkbox_genFocusMap.isChecked())))
+        self.checkbox_hybridAutofocus.setChecked(bool(preset_data.get('hybrid_focus', self.checkbox_hybridAutofocus.isChecked())))
+        self.checkbox_usePiezo.setChecked(bool(preset_data.get('use_piezo', self.checkbox_usePiezo.isChecked())))
+        self.checkbox_useCoordinateAcquisition.setChecked(bool(preset_data.get('use_coordinate_acquisition', self.checkbox_useCoordinateAcquisition.isChecked())))
+        self._set_selected_channels(preset_data.get('selected_channels', []))
+
+        image_corrections = preset_data.get('image_corrections')
+        if image_corrections is not None and self.multipointController.whiteBalanceController is not None:
+            flatfield_path = preset_data.get('_flatfield_path')
+            self.multipointController.whiteBalanceController.import_profile(image_corrections, flatfield_path=flatfield_path)
+            self._refresh_correction_ui()
+
+        self.update_coordinates()
+
+    def save_current_preset(self):
+        preset_name = self.entry_preset_name.text().strip() or self.dropdown_presets.currentText().strip()
+        if not preset_name:
+            QMessageBox.warning(self, "Preset", "Enter a preset name first.")
+            return
+
+        try:
+            self.presetStore.save_preset(
+                preset_name,
+                self.collect_preset_data(),
+                whiteBalanceController=self.multipointController.whiteBalanceController,
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Preset", f"Could not save preset:\n{exc}")
+            return
+
+        self.refresh_preset_list(selected_name=preset_name)
+        self.entry_preset_name.setText(preset_name)
+
+    def load_selected_preset(self):
+        preset_name = self.dropdown_presets.currentText().strip()
+        if not preset_name:
+            QMessageBox.information(self, "Preset", "No preset selected.")
+            return
+
+        try:
+            preset_data = self.presetStore.load_preset(preset_name)
+        except (OSError, ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "Preset", f"Could not load preset:\n{exc}")
+            return
+
+        self.entry_preset_name.setText(preset_name)
+        self.apply_preset_data(preset_data)
+
+    def delete_selected_preset(self):
+        preset_name = self.dropdown_presets.currentText().strip()
+        if not preset_name:
+            QMessageBox.information(self, "Preset", "No preset selected.")
+            return
+
+        self.presetStore.delete_preset(preset_name)
+        self.refresh_preset_list()
+
+    def set_acquisition_pattern(self, pattern):
+        self.acquisition_pattern = pattern
+        self.update_coordinates()
+
+    def set_fov_pattern(self, pattern):
+        self.fov_pattern = pattern
+        self.update_coordinates()
+
+    def _planner_bounds_to_shape(self, x_min_mm, y_min_mm, width_mm, height_mm):
+        return np.array([
+            [x_min_mm, y_min_mm],
+            [x_min_mm + width_mm, y_min_mm],
+            [x_min_mm + width_mm, y_min_mm + height_mm],
+            [x_min_mm, y_min_mm + height_mm],
+        ], dtype=np.float32)
+
+    def toggle_scan_planner(self, checked):
+        self.scan_planner_active = checked
+        self.btn_show_scan_planner.setText("Hide Scan Box" if checked else "Show Scan Box")
+        self.navigationViewer.set_scan_planner_roi_visible(checked)
+        if checked:
+            self.checkbox_useCoordinateAcquisition.setChecked(True)
+            if self.scan_planner_bounds_mm is None:
+                self.center_scan_planner_on_current_fov()
+        self.update_coordinates()
+
+    def center_scan_planner_on_current_fov(self):
+        width_mm = self.entry_scan_size.value()
+        height_mm = self.entry_scan_size.value()
+
+        if self.scan_planner_bounds_mm is not None:
+            width_mm = self.scan_planner_bounds_mm[2]
+            height_mm = self.scan_planner_bounds_mm[3]
+
+        self.navigationViewer.center_scan_planner_roi_on(
+            self.navigationController.x_pos_mm,
+            self.navigationController.y_pos_mm,
+            width_mm,
+            height_mm,
+        )
+        self.scan_planner_bounds_mm = self.navigationViewer.get_scan_planner_bounds_mm()
+        self.update_coordinates()
+
+    def update_scan_planner_roi(self, x_min_mm, y_min_mm, width_mm, height_mm):
+        self.scan_planner_bounds_mm = (x_min_mm, y_min_mm, width_mm, height_mm)
+        if self.scan_planner_active:
+            self.update_coordinates()
 
     def update_region_progress(self, current_fov, num_fovs):
         self.progress_bar.setMaximum(num_fovs)
@@ -3899,6 +4342,9 @@ class MultiPointWidgetGrid(QFrame):
         self.entry_maxZ.blockSignals(False)
 
     def set_live_scan_coordinates(self, x_mm, y_mm):
+        if self.scan_planner_active:
+            return
+
         parent = self.multipointController.parent
         is_current_widget = (parent is not None and hasattr(parent, 'recordTabWidget') and
                              parent.recordTabWidget.currentWidget() == self)
@@ -3941,7 +4387,22 @@ class MultiPointWidgetGrid(QFrame):
 
     def update_coordinates(self):
         shape = self.combobox_shape.currentText()
-        if shape == 'Manual':
+        if self.scan_planner_active and self.scan_planner_bounds_mm is not None:
+            self.clear_regions()
+            x_min_mm, y_min_mm, width_mm, height_mm = self.scan_planner_bounds_mm
+            planner_shape = self._planner_bounds_to_shape(x_min_mm, y_min_mm, width_mm, height_mm)
+            scan_coordinates = self.create_manual_region_coordinates(
+                self.objectiveStore,
+                planner_shape,
+                overlap_percent=self.entry_overlap.value()
+            )
+            if scan_coordinates:
+                region_name = 'scan_box'
+                center = np.mean(planner_shape, axis=0)
+                self.region_fov_coordinates_dict[region_name] = scan_coordinates
+                self.region_coordinates[region_name] = [float(center[0]), float(center[1])]
+
+        elif shape == 'Manual':
             self.region_fov_coordinates_dict.clear()
             self.region_coordinates.clear()
             if self.manual_shapes is not None:
@@ -3979,7 +4440,7 @@ class MultiPointWidgetGrid(QFrame):
             self.region_coordinates[well_id][2] = new_z
         else:
             # [x, y] -> [x, y, new_z]
-            self.region_coordinates[well_id].append[new_z]
+            self.region_coordinates[well_id].append(new_z)
         print(f"Updated z-level to {new_z} for region {well_id}")
 
     def add_region(self, well_id, x, y):
@@ -4324,7 +4785,11 @@ class MultiPointWidgetGrid(QFrame):
             self.multipointController.set_Nt(self.entry_Nt.value())
             self.multipointController.set_use_piezo(self.checkbox_usePiezo.isChecked())
             self.multipointController.set_af_flag(self.checkbox_withAutofocus.isChecked())
+            self.multipointController.set_af_interval(self.entry_af_interval.value())
             self.multipointController.set_reflection_af_flag(self.checkbox_withReflectionAutofocus.isChecked())
+            self.multipointController.set_gen_focus_map_flag(self.checkbox_genFocusMap.isChecked())
+            self.multipointController.set_hybrid_focus_flag(self.checkbox_hybridAutofocus.isChecked())
+            self.multipointController.set_base_path(self.lineEdit_savingDir.text())
             self.multipointController.set_selected_configurations([item.text() for item in self.list_configurations.selectedItems()])
             self.multipointController.start_new_experiment(self.lineEdit_experimentID.text())
 
@@ -4348,7 +4813,10 @@ class MultiPointWidgetGrid(QFrame):
     def acquisition_is_finished(self):
         self.signal_acquisition_started.emit(False)
         self.btn_startAcquisition.setChecked(False)
-        self.set_well_coordinates(self.well_selected)
+        if self.scan_planner_active:
+            self.update_coordinates()
+        else:
+            self.set_well_coordinates(self.well_selected)
         if self.combobox_shape.currentText() == 'Manual':
             self.signal_draw_shape.emit(True)
         self.setEnabled_all(True)

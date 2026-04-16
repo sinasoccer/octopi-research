@@ -88,14 +88,27 @@ class ObjectiveStore:
 
 
 class WhiteBalanceController:
-    def __init__(self, enabled=False, gains=(1.0, 1.0, 1.0), settings_path='cache/software_white_balance.json'):
+    def __init__(
+        self,
+        enabled=False,
+        gains=(1.0, 1.0, 1.0),
+        settings_path='cache/software_white_balance.json',
+        flatfield_enabled=False,
+        flatfield_path='cache/software_flatfield.npz',
+    ):
         self._enabled = enabled
+        self._flatfield_enabled = flatfield_enabled
         self._gains = np.array(gains, dtype=np.float32)
         self._reference_image = None
+        self._latest_image = None
+        self._latest_full_image = None
         self._latest_rgb_image = None
+        self._flatfield_reference = None
         self._lock = Lock()
         self._settings_path = settings_path
+        self._flatfield_path = flatfield_path
         self._load_state()
+        self._load_flatfield_reference()
 
     @staticmethod
     def _is_rgb_image(image):
@@ -113,6 +126,26 @@ class WhiteBalanceController:
         with self._lock:
             return self._enabled
 
+    def is_flatfield_enabled(self):
+        with self._lock:
+            return self._flatfield_enabled and self._flatfield_reference is not None
+
+    def has_reference_image(self):
+        with self._lock:
+            return self._reference_image is not None
+
+    def has_latest_image(self):
+        with self._lock:
+            return self._latest_image is not None
+
+    def has_latest_rgb_image(self):
+        with self._lock:
+            return self._latest_rgb_image is not None
+
+    def has_flatfield_reference(self):
+        with self._lock:
+            return self._flatfield_reference is not None
+
     def _load_state(self):
         if not self._settings_path or not os.path.exists(self._settings_path):
             return
@@ -125,10 +158,14 @@ class WhiteBalanceController:
 
         gains = state.get('gains')
         enabled = state.get('enabled')
+        flatfield_enabled = state.get('flatfield_enabled')
+
         if isinstance(gains, list) and len(gains) == 3:
             self._gains = np.array(gains, dtype=np.float32)
         if enabled is not None:
             self._enabled = bool(enabled)
+        if flatfield_enabled is not None:
+            self._flatfield_enabled = bool(flatfield_enabled)
 
     def _save_state(self):
         if not self._settings_path:
@@ -142,6 +179,7 @@ class WhiteBalanceController:
             state = {
                 'enabled': self._enabled,
                 'gains': [float(value) for value in self._gains],
+                'flatfield_enabled': self._flatfield_enabled,
             }
 
         try:
@@ -150,9 +188,51 @@ class WhiteBalanceController:
         except OSError:
             pass
 
+    def _load_flatfield_reference(self):
+        if not self._flatfield_path or not os.path.exists(self._flatfield_path):
+            return
+
+        try:
+            with np.load(self._flatfield_path) as data:
+                flatfield = data['flatfield']
+        except (OSError, ValueError, KeyError):
+            return
+
+        with self._lock:
+            self._flatfield_reference = flatfield.astype(np.float32, copy=False)
+
+    def _save_flatfield_reference(self):
+        with self._lock:
+            flatfield_reference = None if self._flatfield_reference is None else self._flatfield_reference.copy()
+
+        if self._flatfield_path is None:
+            return
+
+        if flatfield_reference is None:
+            try:
+                if os.path.exists(self._flatfield_path):
+                    os.remove(self._flatfield_path)
+            except OSError:
+                pass
+            return
+
+        directory = os.path.dirname(self._flatfield_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+        try:
+            np.savez_compressed(self._flatfield_path, flatfield=flatfield_reference)
+        except OSError:
+            pass
+
     def set_enabled(self, enabled):
         with self._lock:
             self._enabled = bool(enabled)
+        self._save_state()
+
+    def set_flatfield_enabled(self, enabled):
+        with self._lock:
+            self._flatfield_enabled = bool(enabled) and self._flatfield_reference is not None
         self._save_state()
 
     def get_gains(self):
@@ -175,27 +255,116 @@ class WhiteBalanceController:
             self._enabled = False
         self._save_state()
 
-    def has_reference_image(self):
+    def clear_flatfield(self):
         with self._lock:
-            return self._reference_image is not None
+            self._flatfield_reference = None
+            self._flatfield_enabled = False
+        self._save_flatfield_reference()
+        self._save_state()
 
-    def has_latest_rgb_image(self):
+    def save_flatfield_reference(self, flatfield_path):
+        if flatfield_path is None:
+            return False
+
         with self._lock:
-            return self._latest_rgb_image is not None
+            flatfield_reference = None if self._flatfield_reference is None else self._flatfield_reference.copy()
 
-    def update_reference_image(self, image):
-        if not self._is_rgb_image(image):
+        if flatfield_reference is None:
+            return False
+
+        directory = os.path.dirname(flatfield_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+        try:
+            np.savez_compressed(flatfield_path, flatfield=flatfield_reference)
+            return True
+        except OSError:
+            return False
+
+    def load_flatfield_reference(self, flatfield_path):
+        if not flatfield_path or not os.path.exists(flatfield_path):
+            self.clear_flatfield()
+            return False
+
+        try:
+            with np.load(flatfield_path) as data:
+                flatfield_reference = data['flatfield'].astype(np.float32, copy=False)
+        except (OSError, ValueError, KeyError):
+            return False
+
+        with self._lock:
+            self._flatfield_reference = flatfield_reference
+            self._flatfield_enabled = True
+
+        self._save_flatfield_reference()
+        self._save_state()
+        return True
+
+    def export_profile(self, flatfield_path=None):
+        with self._lock:
+            profile = {
+                'enabled': bool(self._enabled),
+                'gains': [float(value) for value in self._gains],
+                'flatfield_enabled': bool(self._flatfield_enabled and self._flatfield_reference is not None),
+                'has_flatfield': self._flatfield_reference is not None,
+            }
+
+        if flatfield_path is not None:
+            if profile['has_flatfield']:
+                self.save_flatfield_reference(flatfield_path)
+            else:
+                try:
+                    if os.path.exists(flatfield_path):
+                        os.remove(flatfield_path)
+                except OSError:
+                    pass
+
+        return profile
+
+    def import_profile(self, profile, flatfield_path=None):
+        if not isinstance(profile, dict):
             return
+
+        gains = profile.get('gains', [1.0, 1.0, 1.0])
+        enabled = bool(profile.get('enabled', False))
+        flatfield_enabled = bool(profile.get('flatfield_enabled', False))
+        has_flatfield = bool(profile.get('has_flatfield', False))
+
+        if isinstance(gains, list) and len(gains) == 3:
+            with self._lock:
+                self._gains = np.array(gains, dtype=np.float32)
+                self._enabled = enabled
+            self._save_state()
+
+        if has_flatfield and flatfield_path and os.path.exists(flatfield_path):
+            self.load_flatfield_reference(flatfield_path)
+            self.set_flatfield_enabled(flatfield_enabled)
+        else:
+            self.clear_flatfield()
+
+    def update_reference_image(self, image, full_image=None):
+        if image is None:
+            return
+
+        if full_image is None:
+            full_image = image
 
         step_y = max(1, image.shape[0] // 512)
         step_x = max(1, image.shape[1] // 512)
-        sampled = np.ascontiguousarray(image[::step_y, ::step_x, :3])
-        if self._looks_monochromatic(sampled):
-            return
+        sampled = np.ascontiguousarray(image[::step_y, ::step_x])
+
+        latest_rgb_image = None
+        reference_image = None
+        if self._is_rgb_image(sampled) and not self._looks_monochromatic(sampled):
+            latest_rgb_image = image
+            reference_image = sampled[:, :, :3]
 
         with self._lock:
-            self._latest_rgb_image = image
-            self._reference_image = sampled
+            self._latest_image = image
+            self._latest_full_image = full_image
+            self._latest_rgb_image = latest_rgb_image
+            self._reference_image = reference_image
 
     def _crop_image_by_bbox(self, image, roi_bounds):
         if image is None or roi_bounds is None:
@@ -221,21 +390,28 @@ class WhiteBalanceController:
         with self._lock:
             if self._reference_image is None:
                 return None
-            gains = self.estimate_gains(self._reference_image)
+            reference_image = self._reference_image.copy()
+
+        corrected_reference = self._apply_flatfield_correction(reference_image, return_dtype=np.float32)
+        gains = self.estimate_gains(corrected_reference)
+
+        with self._lock:
             self._gains[:] = gains
             self._enabled = True
+
         self._save_state()
         return tuple(float(value) for value in gains)
 
     def auto_balance_from_background_roi(self, roi_bounds):
         with self._lock:
-            image = self._latest_rgb_image
+            image = None if self._latest_rgb_image is None else self._latest_rgb_image.copy()
 
         roi_image = self._crop_image_by_bbox(image, roi_bounds)
         if roi_image is None or not self._is_rgb_image(roi_image):
             return None
 
-        gains = self.estimate_background_gains(roi_image)
+        corrected_roi_image = self._apply_flatfield_correction(roi_image, return_dtype=np.float32)
+        gains = self.estimate_background_gains(corrected_roi_image)
 
         with self._lock:
             self._gains[:] = gains
@@ -243,6 +419,47 @@ class WhiteBalanceController:
 
         self._save_state()
         return tuple(float(value) for value in gains)
+
+    def capture_flatfield_from_current_frame(self):
+        with self._lock:
+            image = None
+            if self._latest_full_image is not None:
+                image = self._latest_full_image.copy()
+            elif self._latest_image is not None:
+                image = self._latest_image.copy()
+
+        if image is None:
+            return False
+
+        return self._set_flatfield_from_image(image)
+
+    def capture_flatfield_from_background_roi(self, roi_bounds):
+        with self._lock:
+            image = None if self._latest_image is None else self._latest_image.copy()
+
+        roi_image = self._crop_image_by_bbox(image, roi_bounds)
+        if roi_image is None:
+            return False
+
+        return self._set_flatfield_from_image(roi_image)
+
+    def _set_flatfield_from_image(self, image):
+        if image is None or image.size == 0:
+            return False
+        if self._is_rgb_image(image) and self._looks_monochromatic(image):
+            return False
+
+        flatfield_reference = self._prepare_flatfield_reference(image)
+        if flatfield_reference is None:
+            return False
+
+        with self._lock:
+            self._flatfield_reference = flatfield_reference
+            self._flatfield_enabled = True
+
+        self._save_flatfield_reference()
+        self._save_state()
+        return True
 
     def estimate_gains(self, image):
         rgb = image.astype(np.float32, copy=False)
@@ -266,7 +483,6 @@ class WhiteBalanceController:
         channel_means = np.maximum(channel_means, 1e-6)
         gains = channel_means.mean() / channel_means
 
-        # Keep green as the anchor channel so exposure does not jump around.
         gains /= gains[1]
         return np.clip(gains, 0.25, 4.0).astype(np.float32)
 
@@ -293,25 +509,89 @@ class WhiteBalanceController:
         gains /= gains[1]
         return np.clip(gains, 0.25, 4.0).astype(np.float32)
 
-    def apply(self, image):
-        if not self._is_rgb_image(image):
-            return image
-        if self._looks_monochromatic(image):
+    def _prepare_flatfield_reference(self, image):
+        image_float = image.astype(np.float32, copy=False)
+        if image_float.size == 0:
+            return None
+
+        sigma = max(image_float.shape[0], image_float.shape[1]) / 30.0
+        sigma = max(5.0, sigma)
+
+        smoothed = cv2.GaussianBlur(image_float, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        smoothed = np.maximum(smoothed, 1e-6)
+
+        if smoothed.ndim == 2:
+            mean_value = float(np.mean(smoothed))
+            if mean_value <= 0:
+                return None
+            normalized = smoothed / mean_value
+        else:
+            channel_means = smoothed.reshape(-1, smoothed.shape[2]).mean(axis=0)
+            channel_means = np.maximum(channel_means, 1e-6)
+            normalized = smoothed / channel_means.reshape((1, 1, smoothed.shape[2]))
+
+        return np.clip(normalized, 0.25, 4.0).astype(np.float32)
+
+    def _resize_flatfield_reference(self, flatfield_reference, image_shape):
+        height, width = image_shape[:2]
+        if flatfield_reference.shape[:2] == (height, width):
+            return flatfield_reference
+
+        if flatfield_reference.ndim == 2:
+            return cv2.resize(flatfield_reference, (width, height), interpolation=cv2.INTER_LINEAR)
+
+        resized_channels = [
+            cv2.resize(flatfield_reference[:, :, channel_index], (width, height), interpolation=cv2.INTER_LINEAR)
+            for channel_index in range(flatfield_reference.shape[2])
+        ]
+        return np.stack(resized_channels, axis=2)
+
+    def _apply_flatfield_correction(self, image, return_dtype=None):
+        if image is None:
             return image
 
         with self._lock:
-            if not self._enabled:
+            flatfield_reference = None if self._flatfield_reference is None else self._flatfield_reference.copy()
+            flatfield_enabled = self._flatfield_enabled
+
+        if flatfield_reference is None or not flatfield_enabled:
+            if return_dtype is None:
                 return image
+            return image.astype(return_dtype, copy=False)
+
+        resized_flatfield = self._resize_flatfield_reference(flatfield_reference, image.shape)
+        corrected = image.astype(np.float32, copy=False) / np.maximum(resized_flatfield, 1e-6)
+
+        target_dtype = image.dtype if return_dtype is None else return_dtype
+        if np.issubdtype(target_dtype, np.integer):
+            info = np.iinfo(target_dtype)
+            corrected = np.clip(corrected, info.min, info.max)
+        else:
+            corrected = np.clip(corrected, 0, None)
+
+        return corrected.astype(target_dtype, copy=False)
+
+    def apply(self, image):
+        corrected = self._apply_flatfield_correction(image)
+
+        if not self._is_rgb_image(corrected):
+            return corrected
+        if self._looks_monochromatic(corrected):
+            return corrected
+
+        with self._lock:
+            if not self._enabled:
+                return corrected
             gains = self._gains.copy()
 
-        balanced = image.astype(np.float32, copy=False) * gains.reshape((1, 1, 3))
+        balanced = corrected.astype(np.float32, copy=False) * gains.reshape((1, 1, 3))
 
-        if np.issubdtype(image.dtype, np.integer):
-            info = np.iinfo(image.dtype)
+        if np.issubdtype(corrected.dtype, np.integer):
+            info = np.iinfo(corrected.dtype)
             balanced = np.clip(balanced, info.min, info.max)
-            return balanced.astype(image.dtype)
+            return balanced.astype(corrected.dtype)
 
-        return balanced.astype(image.dtype, copy=False)
+        return np.clip(balanced, 0, None).astype(corrected.dtype, copy=False)
 
 class StreamHandler(QObject):
 
@@ -401,11 +681,11 @@ class StreamHandler(QObject):
             # @@@ to move to camera
             image_cropped = utils.rotate_and_flip_image(image_cropped,rotate_image_angle=camera.rotate_image_angle,flip_image=camera.flip_image)
 
-            if self.whiteBalanceController is not None and WhiteBalanceController._is_rgb_image(image_cropped):
+            if self.whiteBalanceController is not None:
                 display_width = round(self.crop_width * self.display_resolution_scaling)
                 display_height = round(self.crop_height * self.display_resolution_scaling)
                 display_reference_image = utils.crop_image(image_cropped, display_width, display_height)
-                self.whiteBalanceController.update_reference_image(display_reference_image)
+                self.whiteBalanceController.update_reference_image(display_reference_image, full_image=image_cropped)
                 image_cropped = self.whiteBalanceController.apply(image_cropped)
 
             # send image to display
@@ -1690,18 +1970,23 @@ class AutoFocusController(QObject):
         self.crop_width = crop_width
         self.crop_height = crop_height
 
+    def apply_focus_map(self):
+        if len(self.focus_map_coords) < 3:
+            return False
+
+        self.navigationController.microcontroller.wait_till_operation_is_completed()
+        x = self.navigationController.x_pos_mm
+        y = self.navigationController.y_pos_mm
+        target_z = utils.interpolate_plane(*self.focus_map_coords[:3], (x, y))
+        print(f"Interpolated target z as {target_z} mm from focus map, moving there.")
+        self.navigationController.move_z_to(target_z)
+        self.navigationController.microcontroller.wait_till_operation_is_completed()
+        return True
+
     def autofocus(self, focus_map_override=False):
         if self.use_focus_map and (not focus_map_override):
             self.autofocus_in_progress = True
-            self.navigationController.microcontroller.wait_till_operation_is_completed()
-            x = self.navigationController.x_pos_mm
-            y = self.navigationController.y_pos_mm
-
-            # z here is in mm because that's how the navigation controller stores it
-            target_z = utils.interpolate_plane(*self.focus_map_coords[:3], (x,y))
-            print(f"Interpolated target z as {target_z} mm from focus map, moving there.")
-            self.navigationController.move_z_to(target_z)
-            self.navigationController.microcontroller.wait_till_operation_is_completed()
+            self.apply_focus_map()
             self.autofocus_in_progress = False
             self.autofocusFinished.emit()
             return
@@ -1904,6 +2189,8 @@ class MultiPointWorker(QObject):
         self.dt = self.multiPointController.deltat
         self.do_autofocus = self.multiPointController.do_autofocus
         self.do_reflection_af= self.multiPointController.do_reflection_af
+        self.af_interval = max(1, int(self.multiPointController.af_interval))
+        self.hybrid_focus_enabled = self.multiPointController.hybrid_focus_enabled
         self.crop_width = self.multiPointController.crop_width
         self.crop_height = self.multiPointController.crop_height
         self.display_resolution_scaling = self.multiPointController.display_resolution_scaling
@@ -2199,10 +2486,9 @@ class MultiPointWorker(QObject):
             self.num_fovs = self.NX * self.NY - len(self.multiPointController.scanCoordinates.grid_skip_positions)
             self.total_scans = self.num_fovs * self.NZ * len(self.selected_configurations)
             fov_count = 0 # count fovs for progress
+            self.af_fov_count = 0
 
             for i in range(self.NY):
-                self.af_fov_count = 0 # for AF, so that AF at the beginning of each new row
-
                 for j in range(self.NX):
                     sgn_i, sgn_j, real_i, real_j = self.calculate_grid_indices(i, j)
 
@@ -2233,6 +2519,7 @@ class MultiPointWorker(QObject):
 
             self.num_fovs = len(coordinates)
             self.total_scans = self.num_fovs * self.NZ * len(self.selected_configurations)
+            self.af_fov_count = 0
 
             for fov_count, coordinate_mm in enumerate(coordinates):
 
@@ -2365,33 +2652,52 @@ class MultiPointWorker(QObject):
             except AttributeError as e:
                 print(repr(e))
 
+    def _update_region_z_after_focus(self, region_id):
+        try:
+            if len(self.scan_coordinates_mm[region_id]) == 3:
+                self.scan_coordinates_mm[region_id][2] = self.navigationController.z_pos_mm
+        except Exception:
+            return
+
+        if self.coordinate_dict is not None:
+            self.microscope.multiPointWidgetGrid.update_region_z_level(region_id, self.navigationController.z_pos_mm)
+        elif self.multiPointController.location_list is not None:
+            try:
+                self.microscope.multiPointWidget2._update_z(region_id, self.navigationController.z_pos_mm)
+            except Exception:
+                print("failed update flexible widget z")
+            try:
+                self.microscope.multiPointWidgetGrid.update_region_z_level(region_id, self.navigationController.z_pos_mm)
+            except Exception:
+                print("failed update grid widget z")
+
     def perform_autofocus(self, region_id):
         if self.do_reflection_af == False:
-            # contrast-based AF; perform AF only if when not taking z stack or doing z stack from center
-            if ( (self.NZ == 1) or self.z_stacking_config == 'FROM CENTER' ) and (self.do_autofocus) and (self.af_fov_count%Acquisition.NUMBER_OF_FOVS_PER_AF==0):
+            can_run_contrast_af = ((self.NZ == 1) or self.z_stacking_config == 'FROM CENTER') and self.do_autofocus
+            should_run_periodic_contrast_af = can_run_contrast_af and (self.af_fov_count % self.af_interval == 0)
+            focused_this_position = False
+
+            if self.autofocusController.use_focus_map and self.hybrid_focus_enabled:
+                focused_this_position = self.autofocusController.apply_focus_map() or focused_this_position
+
+            if self.autofocusController.use_focus_map and not self.do_autofocus and not self.hybrid_focus_enabled:
+                focused_this_position = self.autofocusController.apply_focus_map() or focused_this_position
+
+            if should_run_periodic_contrast_af:
                 configuration_name_AF = MULTIPOINT_AUTOFOCUS_CHANNEL
                 config_AF = next((config for config in self.configurationManager.configurations if config.name == configuration_name_AF))
                 self.signal_current_configuration.emit(config_AF)
-                if (self.af_fov_count%Acquisition.NUMBER_OF_FOVS_PER_AF==0) or self.autofocusController.use_focus_map:
+
+                if self.hybrid_focus_enabled and self.autofocusController.use_focus_map:
+                    self.autofocusController.autofocus(focus_map_override=True)
+                else:
                     self.autofocusController.autofocus()
-                    self.autofocusController.wait_till_autofocus_has_completed()
-                # update z location of scan_coordinates_mm after AF
-                if len(self.scan_coordinates_mm[region_id]) == 3:
-                    self.scan_coordinates_mm[region_id][2] = self.navigationController.z_pos_mm
-                    # update the coordinate in the widget
-                    if self.coordinate_dict is not None:
-                        self.microscope.multiPointWidgetGrid.update_region_z_level(region_id, self.navigationController.z_pos_mm)
-                    elif self.multiPointController.location_list is not None:
-                        try:
-                            self.microscope.multiPointWidget2._update_z(region_id, self.navigationController.z_pos_mm)
-                        except:
-                            print("failed update flexible widget z")
-                            pass
-                        try:
-                            self.microscope.multiPointWidgetGrid.update_region_z_level(region_id, self.navigationController.z_pos_mm)
-                        except:
-                            print("failed update grid widget z")
-                            pass
+
+                self.autofocusController.wait_till_autofocus_has_completed()
+                focused_this_position = True
+
+            if focused_this_position:
+                self._update_region_z_after_focus(region_id)
         else: 
             # initialize laser autofocus if it has not been done
             if self.microscope.laserAutofocusController.is_initialized==False:
@@ -2407,6 +2713,7 @@ class MultiPointWorker(QObject):
                     self.autofocusController.wait_till_autofocus_has_completed()
                 # set the current plane as reference
                 self.microscope.laserAutofocusController.set_reference()
+                self._update_region_z_after_focus(region_id)
             else:
                 print("laser reflection af")
                 try:
@@ -2415,6 +2722,7 @@ class MultiPointWorker(QObject):
                         self.microscope.laserAutofocusController.move_to_target(0) # for stepper in open loop mode, repeat the operation to counter backlash
                     else:
                         self.microscope.laserAutofocusController.move_to_target(0)
+                    self._update_region_z_after_focus(region_id)
                 except:
                     file_ID = f"{region_id}_focus_camera.bmp"
                     saving_path = os.path.join(self.base_path, self.experiment_ID, str(self.time_point), file_ID)
@@ -2476,13 +2784,13 @@ class MultiPointWorker(QObject):
         # process the image -  @@@ to move to camera
         image = utils.crop_image(image,self.crop_width,self.crop_height)
         image = utils.rotate_and_flip_image(image,rotate_image_angle=self.camera.rotate_image_angle,flip_image=self.camera.flip_image)
-        if self.whiteBalanceController is not None and WhiteBalanceController._is_rgb_image(image):
+        if self.whiteBalanceController is not None:
             display_reference_image = utils.crop_image(
                 image,
                 round(self.crop_width*self.display_resolution_scaling),
                 round(self.crop_height*self.display_resolution_scaling),
             )
-            self.whiteBalanceController.update_reference_image(display_reference_image)
+            self.whiteBalanceController.update_reference_image(display_reference_image, full_image=image)
         image = self.apply_white_balance_if_needed(image)
         image_to_display = utils.crop_image(image,round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling))
         self.image_to_display.emit(image_to_display)
@@ -2654,7 +2962,7 @@ class MultiPointWorker(QObject):
                     round(self.crop_width * self.display_resolution_scaling),
                     round(self.crop_height * self.display_resolution_scaling),
                 )
-                self.whiteBalanceController.update_reference_image(display_reference_image)
+                self.whiteBalanceController.update_reference_image(display_reference_image, full_image=rgb_image)
             rgb_image = self.apply_white_balance_if_needed(rgb_image)
 
             # send image to display
@@ -2670,13 +2978,13 @@ class MultiPointWorker(QObject):
 
     def handle_rgb_channels(self, images, file_ID, current_path, config, i, j, k):
         for channel in ['BF LED matrix full_R', 'BF LED matrix full_G', 'BF LED matrix full_B']:
-            if self.whiteBalanceController is not None and WhiteBalanceController._is_rgb_image(images[channel]):
+            if self.whiteBalanceController is not None:
                 display_reference_image = utils.crop_image(
                     images[channel],
                     round(self.crop_width * self.display_resolution_scaling),
                     round(self.crop_height * self.display_resolution_scaling),
                 )
-                self.whiteBalanceController.update_reference_image(display_reference_image)
+                self.whiteBalanceController.update_reference_image(display_reference_image, full_image=images[channel])
             image = self.apply_white_balance_if_needed(images[channel])
             image_to_display = utils.crop_image(image, round(self.crop_width * self.display_resolution_scaling), round(self.crop_height * self.display_resolution_scaling))
             self.image_to_display.emit(image_to_display)
@@ -2698,7 +3006,7 @@ class MultiPointWorker(QObject):
                 round(self.crop_width * self.display_resolution_scaling),
                 round(self.crop_height * self.display_resolution_scaling),
             )
-            self.whiteBalanceController.update_reference_image(display_reference_image)
+            self.whiteBalanceController.update_reference_image(display_reference_image, full_image=rgb_image)
         rgb_image = self.apply_white_balance_if_needed(rgb_image)
 
         # send image to display
@@ -2716,9 +3024,6 @@ class MultiPointWorker(QObject):
     def apply_white_balance_if_needed(self, image):
         if self.whiteBalanceController is None:
             return image
-        if not WhiteBalanceController._is_rgb_image(image):
-            return image
-
         return self.whiteBalanceController.apply(image)
 
     def handle_acquisition_abort(self, current_path, region_id=0):
@@ -2885,7 +3190,9 @@ class MultiPointController(QObject):
         self.deltat = 0
         self.do_autofocus = False
         self.do_reflection_af = False
+        self.af_interval = MULTIPOINT_AUTOFOCUS_INTERVAL
         self.gen_focus_map = False
+        self.hybrid_focus_enabled = MULTIPOINT_HYBRID_AUTOFOCUS_ENABLE_BY_DEFAULT
         self.focus_map_storage = []
         self.already_using_fmap = False
         self.do_segmentation = False
@@ -2967,10 +3274,16 @@ class MultiPointController(QObject):
     def set_reflection_af_flag(self,flag):
         self.do_reflection_af = flag
 
+    def set_af_interval(self, interval):
+        self.af_interval = max(1, int(interval))
+
     def set_gen_focus_map_flag(self, flag):
         self.gen_focus_map = flag
         if not flag:
             self.autofocusController.set_focus_map_use(False)
+
+    def set_hybrid_focus_flag(self, flag):
+        self.hybrid_focus_enabled = bool(flag)
 
     def set_stitch_tiles_flag(self, flag):
         self.do_stitch_tiles = flag
@@ -3003,6 +3316,8 @@ class MultiPointController(QObject):
             'dz(um)': self.deltaZ * 1000 if self.deltaZ != 0 else 1, 'Nz': self.NZ,
             'dt(s)': self.deltat, 'Nt': self.Nt,
             'with AF': self.do_autofocus, 'with reflection AF': self.do_reflection_af,
+            'AF interval (fields)': self.af_interval,
+            'hybrid focus map AF': self.hybrid_focus_enabled,
         }
         try: # write objective data if it is available
             current_objective = self.parent.objectiveStore.current_objective
@@ -3032,12 +3347,58 @@ class MultiPointController(QObject):
         for configuration_name in selected_configurations_name:
             self.selected_configurations.append(next((config for config in self.configurationManager.configurations if config.name == configuration_name)))
 
+    def _get_focus_map_seed_points(self):
+        if self.coordinate_dict is not None:
+            all_coordinates = []
+            for coordinates in self.coordinate_dict.values():
+                for coordinate in coordinates:
+                    all_coordinates.append(coordinate[:2])
+
+            if len(all_coordinates) == 0:
+                return None
+
+            all_coordinates = np.asarray(all_coordinates, dtype=np.float32)
+            min_x = float(np.min(all_coordinates[:, 0]))
+            max_x = float(np.max(all_coordinates[:, 0]))
+            min_y = float(np.min(all_coordinates[:, 1]))
+            max_y = float(np.max(all_coordinates[:, 1]))
+
+            if math.isclose(min_x, max_x):
+                max_x = min_x + 0.1
+            if math.isclose(min_y, max_y):
+                max_y = min_y + 0.1
+
+            return (min_x, min_y), (max_x, min_y), (min_x, max_y)
+
+        starting_x_mm = self.navigationController.x_pos_mm
+        starting_y_mm = self.navigationController.y_pos_mm
+        fmap_Nx = max(2, self.NX - 1)
+        fmap_Ny = max(2, self.NY - 1)
+        fmap_dx = self.deltaX
+        fmap_dy = self.deltaY
+
+        if abs(fmap_dx) < 0.1 and fmap_dx != 0.0:
+            fmap_dx = 0.1 * fmap_dx / abs(fmap_dx)
+        elif fmap_dx == 0.0:
+            fmap_dx = 0.1
+
+        if abs(fmap_dy) < 0.1 and fmap_dy != 0.0:
+            fmap_dy = 0.1 * fmap_dy / abs(fmap_dy)
+        elif fmap_dy == 0.0:
+            fmap_dy = 0.1
+
+        return (
+            (starting_x_mm, starting_y_mm),
+            (starting_x_mm + fmap_Nx * fmap_dx, starting_y_mm),
+            (starting_x_mm, starting_y_mm + fmap_Ny * fmap_dy),
+        )
+
     def run_acquisition(self, location_list=None, coordinate_dict=None):
         print('start multipoint')
 
         if coordinate_dict is not None:
             print('Using coordinate-based acquisition')
-            total_points = sum(len(coords) for coords in coordinate_dict)
+            total_points = sum(len(coords) for coords in coordinate_dict.values())
             self.coordinate_dict = coordinate_dict
             self.location_list = None
             self.use_scan_coordinates = False
@@ -3129,26 +3490,12 @@ class MultiPointController(QObject):
             print("Generating focus map for multipoint grid")
             starting_x_mm = self.navigationController.x_pos_mm
             starting_y_mm = self.navigationController.y_pos_mm
-            fmap_Nx = max(2,self.NX-1)
-            fmap_Ny = max(2,self.NY-1)
-            fmap_dx = self.deltaX
-            fmap_dy = self.deltaY
-            if abs(fmap_dx) < 0.1 and fmap_dx != 0.0:
-                fmap_dx = 0.1*fmap_dx/(abs(fmap_dx))
-            elif fmap_dx == 0.0:
-                fmap_dx = 0.1
-            if abs(fmap_dy) < 0.1 and fmap_dy != 0.0:
-                 fmap_dy = 0.1*fmap_dy/(abs(fmap_dy))
-            elif fmap_dy == 0.0:
-                fmap_dy = 0.1
             try:
                 self.focus_map_storage = []
                 self.already_using_fmap = self.autofocusController.use_focus_map
                 for x,y,z in self.autofocusController.focus_map_coords:
                     self.focus_map_storage.append((x,y,z))
-                coord1 = (starting_x_mm, starting_y_mm)
-                coord2 = (starting_x_mm+fmap_Nx*fmap_dx,starting_y_mm)
-                coord3 = (starting_x_mm,starting_y_mm+fmap_Ny*fmap_dy)
+                coord1, coord2, coord3 = self._get_focus_map_seed_points()
                 self.autofocusController.gen_focus_map(coord1, coord2, coord3)
                 self.autofocusController.set_focus_map_use(True)
                 self.navigationController.move_to(starting_x_mm, starting_y_mm)
@@ -3862,6 +4209,7 @@ class NavigationViewer(QFrame):
 
     signal_update_live_scan_grid = Signal(float, float)
     signal_update_well_coordinates = Signal(bool)
+    signal_scan_planner_roi_changed = Signal(float, float, float, float)
 
     def __init__(self, objectivestore, sample = 'glass slide', invertX = False, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -3882,6 +4230,8 @@ class NavigationViewer(QFrame):
         self.x_mm = None
         self.y_mm = None
         self.acquisition_started = False
+        self.scan_planner_bounds_mm = None
+        self.scan_planner_visible = False
         self.image_paths = {
             'glass slide': 'images/slide carrier_828x662.png',
             '4 glass slide': 'images/4 slide carrier_1509x1010.png',
@@ -3943,6 +4293,106 @@ class NavigationViewer(QFrame):
         self.view.addItem(self.scan_overlay_item)
         self.view.addItem(self.fov_overlay_item)
 
+        self.scan_planner_roi = pg.RectROI((0, 0), (100, 100), pen=pg.mkPen((0, 170, 255), width=2))
+        self.scan_planner_roi.setZValue(20)
+        self.scan_planner_roi.addScaleHandle((0, 0), (1, 1))
+        self.scan_planner_roi.addScaleHandle((1, 1), (0, 0))
+        self.scan_planner_roi.addScaleHandle((1, 0), (0, 1))
+        self.scan_planner_roi.addScaleHandle((0, 1), (1, 0))
+        self.scan_planner_roi.sigRegionChanged.connect(self.on_scan_planner_roi_changed)
+        self.view.addItem(self.scan_planner_roi)
+        self.scan_planner_roi.hide()
+
+        if self.scan_planner_bounds_mm is not None:
+            self.set_scan_planner_bounds_mm(*self.scan_planner_bounds_mm)
+        if self.scan_planner_visible:
+            self.scan_planner_roi.show()
+
+    def mm_to_pixel(self, x_mm, y_mm):
+        x_pixel = self.origin_x_pixel + x_mm / self.mm_per_pixel
+        if self.sample == 'glass slide':
+            y_pixel = self.image_height - (self.origin_y_pixel + y_mm / self.mm_per_pixel)
+        else:
+            y_pixel = self.origin_y_pixel + y_mm / self.mm_per_pixel
+        return float(x_pixel), float(y_pixel)
+
+    def pixel_to_mm(self, x_pixel, y_pixel):
+        x_mm = (x_pixel - self.origin_x_pixel) * self.mm_per_pixel
+        if self.sample == 'glass slide':
+            y_mm = ((self.image_height - y_pixel) - self.origin_y_pixel) * self.mm_per_pixel
+        else:
+            y_mm = (y_pixel - self.origin_y_pixel) * self.mm_per_pixel
+        return float(x_mm), float(y_mm)
+
+    def on_scan_planner_roi_changed(self):
+        if self.scan_planner_roi is None:
+            return
+
+        self.scan_planner_bounds_mm = self.get_scan_planner_bounds_mm()
+        if self.scan_planner_bounds_mm is None:
+            return
+
+        self.signal_scan_planner_roi_changed.emit(*self.scan_planner_bounds_mm)
+
+    def set_scan_planner_roi_visible(self, visible):
+        self.scan_planner_visible = bool(visible)
+        if visible:
+            if self.scan_planner_bounds_mm is None:
+                center_x = self.x_mm if self.x_mm is not None else 0.0
+                center_y = self.y_mm if self.y_mm is not None else 0.0
+                default_size_mm = max(self.fov_size_mm * 2, 1.0)
+                self.center_scan_planner_roi_on(center_x, center_y, default_size_mm, default_size_mm)
+            self.scan_planner_roi.show()
+            self.on_scan_planner_roi_changed()
+        else:
+            self.scan_planner_roi.hide()
+
+    def is_scan_planner_roi_visible(self):
+        return self.scan_planner_roi.isVisible()
+
+    def center_scan_planner_roi_on(self, x_mm, y_mm, width_mm, height_mm):
+        width_mm = max(0.1, float(width_mm))
+        height_mm = max(0.1, float(height_mm))
+        xmin = float(x_mm) - width_mm / 2
+        ymin = float(y_mm) - height_mm / 2
+        self.set_scan_planner_bounds_mm(xmin, ymin, width_mm, height_mm)
+
+    def set_scan_planner_bounds_mm(self, x_min_mm, y_min_mm, width_mm, height_mm):
+        width_mm = max(0.1, float(width_mm))
+        height_mm = max(0.1, float(height_mm))
+        x_max_mm = float(x_min_mm) + width_mm
+        y_max_mm = float(y_min_mm) + height_mm
+
+        x0_pixel, y0_pixel = self.mm_to_pixel(float(x_min_mm), float(y_min_mm))
+        x1_pixel, y1_pixel = self.mm_to_pixel(x_max_mm, y_max_mm)
+
+        pos_x = min(x0_pixel, x1_pixel)
+        pos_y = min(y0_pixel, y1_pixel)
+        size_x = max(2.0, abs(x1_pixel - x0_pixel))
+        size_y = max(2.0, abs(y1_pixel - y0_pixel))
+
+        self.scan_planner_roi.blockSignals(True)
+        self.scan_planner_roi.setPos((pos_x, pos_y))
+        self.scan_planner_roi.setSize((size_x, size_y))
+        self.scan_planner_roi.blockSignals(False)
+
+        self.scan_planner_bounds_mm = (float(x_min_mm), float(y_min_mm), width_mm, height_mm)
+
+    def get_scan_planner_bounds_mm(self):
+        if self.scan_planner_roi is None:
+            return None
+
+        position = self.scan_planner_roi.pos()
+        size = self.scan_planner_roi.size()
+        x0_mm, y0_mm = self.pixel_to_mm(position[0], position[1])
+        x1_mm, y1_mm = self.pixel_to_mm(position[0] + size[0], position[1] + size[1])
+
+        x_min_mm = min(x0_mm, x1_mm)
+        y_min_mm = min(y0_mm, y1_mm)
+        width_mm = abs(x1_mm - x0_mm)
+        height_mm = abs(y1_mm - y0_mm)
+        return (x_min_mm, y_min_mm, width_mm, height_mm)
+
     def update_display_properties(self, sample):
         if sample == 'glass slide':
             self.location_update_threshold_mm = 0.2
@@ -3964,6 +4414,8 @@ class NavigationViewer(QFrame):
             self.view.invertX(False)
             self.view.invertY(True)
         self.update_fov_size()
+        if self.scan_planner_bounds_mm is not None and self.scan_planner_roi is not None:
+            self.set_scan_planner_bounds_mm(*self.scan_planner_bounds_mm)
 
     def update_fov_size(self):
         pixel_size_um = self.objectiveStore.get_pixel_size()
