@@ -152,7 +152,11 @@ class OctopiGUI(QMainWindow):
             self.navigationController = NavigationController_PriorStage(self.priorstage, self.microcontroller, self.objectiveStore, parent=self)
         else:
             self.navigationController = core.NavigationController(self.microcontroller, self.objectiveStore, parent=self)
-        self.slidePositionController = core.SlidePositionController(self.navigationController, self.liveController, is_for_wellplate=True)
+        self.slidePositionController = core.SlidePositionController(
+            self.navigationController,
+            self.liveController,
+            is_for_wellplate=(WELLPLATE_FORMAT != 0),
+        )
         self.autofocusController = core.AutoFocusController(self.camera, self.navigationController, self.liveController)
         self.scanCoordinates = core.ScanCoordinates()
         self.multipointController = core.MultiPointController(
@@ -689,13 +693,19 @@ class OctopiGUI(QMainWindow):
 
     def setupSingleWindowSlideScanLayout(self):
         main_splitter = QSplitter(Qt.Horizontal)
-        left_splitter = QSplitter(Qt.Vertical)
+        left_column = QWidget()
+        left_layout = QVBoxLayout()
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
 
         live_group = QGroupBox("Live View")
         live_layout = QVBoxLayout()
         if SHOW_NAVIGATION_BAR:
             live_layout.addWidget(self.navigationBarWidget)
-        live_widget = self.imageDisplayWindow.widget if hasattr(self, 'imageDisplayWindow') else self.imageDisplayTabs
+        live_widget = self.imageDisplayTabs
+        if isinstance(self.imageDisplayTabs, QTabWidget):
+            self.imageDisplayTabs.setCurrentIndex(0)
+            self.imageDisplayTabs.tabBar().hide()
         live_layout.addWidget(live_widget)
         live_group.setLayout(live_layout)
 
@@ -707,23 +717,24 @@ class OctopiGUI(QMainWindow):
         map_layout.addWidget(map_hint)
         map_layout.addWidget(self.navigationViewer)
         map_group.setLayout(map_layout)
-        self.navigationViewer.setMinimumHeight(280)
+        self.navigationViewer.setMinimumHeight(160)
+        self.navigationViewer.setMaximumHeight(210)
+        self.navigationViewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        left_splitter.addWidget(live_group)
-        left_splitter.addWidget(map_group)
-        left_splitter.setStretchFactor(0, 5)
-        left_splitter.setStretchFactor(1, 3)
+        left_layout.addWidget(live_group, 1)
+        left_layout.addWidget(map_group, 0)
+        left_column.setLayout(left_layout)
 
         workflow_scroll = QScrollArea()
         workflow_scroll.setWidgetResizable(True)
         workflow_scroll.setFrameShape(QFrame.NoFrame)
         workflow_scroll.setWidget(self.centralWidget)
 
-        main_splitter.addWidget(left_splitter)
+        main_splitter.addWidget(left_column)
         main_splitter.addWidget(workflow_scroll)
         main_splitter.setStretchFactor(0, 5)
         main_splitter.setStretchFactor(1, 2)
-        main_splitter.setSizes([1200, 520])
+        main_splitter.setSizes([1380, 460])
 
         self.setCentralWidget(main_splitter)
 
@@ -886,6 +897,7 @@ class OctopiGUI(QMainWindow):
             self.laserAutofocusController.image_to_display.connect(self.imageDisplayWindow_focus.display_image)
 
         self.camera.set_callback(self.streamHandler.on_new_frame)
+        self.onWellplateChanged(WELLPLATE_FORMAT)
 
     def makeNapariConnections(self):
         """Initialize all Napari connections in one place"""
@@ -1177,6 +1189,8 @@ class OctopiGUI(QMainWindow):
             self.stitcherWidget.hide()
 
     def onStartLive(self):
+        if isinstance(self.imageDisplayTabs, QTabWidget):
+            self.imageDisplayTabs.setCurrentIndex(0)
         if not self.slideScanWorkflowEnabled:
             self.imageDisplayTabs.setCurrentIndex(0)
 
