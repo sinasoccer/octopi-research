@@ -4361,7 +4361,9 @@ class MultiPointWidgetGrid(QFrame):
         self.navigationViewer.set_scan_planner_roi_visible(checked)
         if checked:
             self.checkbox_useCoordinateAcquisition.setChecked(True)
-            if self.scan_planner_bounds_mm is None:
+            if self._is_slide_sample():
+                self.navigationViewer.arm_scan_planner_draw()
+            elif self.scan_planner_bounds_mm is None:
                 self.center_scan_planner_on_current_fov()
         self.update_coordinates()
 

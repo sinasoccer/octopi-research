@@ -4205,6 +4205,40 @@ class ImageDisplayWindow(QMainWindow):
         print('set autolevel to ' + str(enabled))
 
 
+class NavigationViewBox(pg.ViewBox):
+
+    signal_scan_planner_drag = Signal(object, object, bool)
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault('enableMenu', False)
+        super().__init__(*args, **kwargs)
+        self.scan_planner_drag_enabled = False
+        self._scan_drag_start = None
+
+    def set_scan_planner_drag_enabled(self, enabled):
+        self.scan_planner_drag_enabled = bool(enabled)
+        if not enabled:
+            self._scan_drag_start = None
+
+    def mouseDragEvent(self, ev, axis=None):
+        if self.scan_planner_drag_enabled and ev.button() == Qt.LeftButton:
+            ev.accept()
+            current_pos = self.mapSceneToView(ev.scenePos())
+            if ev.isStart() or self._scan_drag_start is None:
+                self._scan_drag_start = current_pos
+
+            finished = ev.isFinish()
+            start_pos = self._scan_drag_start
+            if finished:
+                self.scan_planner_drag_enabled = False
+                self._scan_drag_start = None
+
+            self.signal_scan_planner_drag.emit(start_pos, current_pos, finished)
+            return
+
+        super().mouseDragEvent(ev, axis)
+
+
 class NavigationViewer(QFrame):
 
     signal_update_live_scan_grid = Signal(float, float)
@@ -4257,8 +4291,10 @@ class NavigationViewer(QFrame):
         self.graphics_widget = pg.GraphicsLayoutWidget()
         self.graphics_widget.setBackground("w")
 
-        self.view = self.graphics_widget.addViewBox(invertX=invertX, invertY=True)
+        self.view = NavigationViewBox(invertX=invertX, invertY=True)
+        self.graphics_widget.addItem(self.view)
         self.view.setAspectLocked(True)
+        self.view.signal_scan_planner_drag.connect(self.on_scan_planner_drag)
 
         self.label_map_title = QLabel("Sample Map")
         self.label_map_title.setStyleSheet("font-weight: 600;")
@@ -4308,6 +4344,8 @@ class NavigationViewer(QFrame):
         return str(self.sample)
 
     def _sample_hint_text(self):
+        if self.is_scan_planner_draw_armed():
+            return 'Drag on the slide image to draw the scan path.'
         if 'glass slide' in self.sample:
             return 'Red overlay shows the current field. Amber boxes show the scan plan.'
         return 'This map is in plate mode. For peripheral blood films, switch Sample / Carrier to Glass Slide.'
@@ -4406,18 +4444,50 @@ class NavigationViewer(QFrame):
     def set_scan_planner_roi_visible(self, visible):
         self.scan_planner_visible = bool(visible)
         if visible:
-            if self.scan_planner_bounds_mm is None:
-                center_x = self.x_mm if self.x_mm is not None else 0.0
-                center_y = self.y_mm if self.y_mm is not None else 0.0
-                default_size_mm = max(self.fov_size_mm * 2, 1.0)
-                self.center_scan_planner_roi_on(center_x, center_y, default_size_mm, default_size_mm)
-            self.scan_planner_roi.show()
-            self.on_scan_planner_roi_changed()
+            if self.scan_planner_bounds_mm is not None:
+                self.scan_planner_roi.show()
+                self.on_scan_planner_roi_changed()
         else:
+            self.view.set_scan_planner_drag_enabled(False)
             self.scan_planner_roi.hide()
+        self.refresh_status_labels()
 
     def is_scan_planner_roi_visible(self):
         return self.scan_planner_roi.isVisible()
+
+    def is_scan_planner_draw_armed(self):
+        return bool(getattr(self.view, 'scan_planner_drag_enabled', False))
+
+    def arm_scan_planner_draw(self):
+        self.scan_planner_visible = True
+        self.view.set_scan_planner_drag_enabled(True)
+        if self.scan_planner_bounds_mm is not None:
+            self.scan_planner_roi.show()
+        self.refresh_status_labels()
+
+    def on_scan_planner_drag(self, start_pos, end_pos, finished):
+        if start_pos is None or end_pos is None:
+            return
+
+        x0 = float(np.clip(start_pos.x(), 0, self.image_width - 1))
+        y0 = float(np.clip(start_pos.y(), 0, self.image_height - 1))
+        x1 = float(np.clip(end_pos.x(), 0, self.image_width - 1))
+        y1 = float(np.clip(end_pos.y(), 0, self.image_height - 1))
+
+        x0_mm, y0_mm = self.pixel_to_mm(x0, y0)
+        x1_mm, y1_mm = self.pixel_to_mm(x1, y1)
+
+        self.set_scan_planner_bounds_mm(
+            min(x0_mm, x1_mm),
+            min(y0_mm, y1_mm),
+            abs(x1_mm - x0_mm),
+            abs(y1_mm - y0_mm),
+        )
+        self.scan_planner_roi.show()
+        self.on_scan_planner_roi_changed()
+
+        if finished:
+            self.refresh_status_labels()
 
     def center_scan_planner_roi_on(self, x_mm, y_mm, width_mm, height_mm):
         width_mm = max(0.1, float(width_mm))
@@ -4508,10 +4578,7 @@ class NavigationViewer(QFrame):
             sample_format = sample_format.value()
 
         if sample_format in (0, '0'):
-            if IS_HCS:
-                sample = '4 glass slide'
-            else:
-                sample = 'glass slide'
+            sample = 'glass slide'
         else:
             sample = sample_format
 

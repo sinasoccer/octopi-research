@@ -174,7 +174,7 @@ class OctopiGUI(QMainWindow):
         if ENABLE_TRACKING:
             self.trackingController = core.TrackingController(self.camera, self.microcontroller, self.navigationController, self.configurationManager, self.liveController, self.autofocusController, self.imageDisplayWindow)
         if WELLPLATE_FORMAT == 0:
-            self.navigationViewer = core.NavigationViewer(self.objectiveStore, sample='4 glass slide')
+            self.navigationViewer = core.NavigationViewer(self.objectiveStore, sample='glass slide')
         else:
             self.navigationViewer = core.NavigationViewer(self.objectiveStore, sample=WELLPLATE_FORMAT)
 
