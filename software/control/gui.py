@@ -68,12 +68,28 @@ class OctopiGUI(QMainWindow):
         self.objectiveStore = core.ObjectiveStore()
         self.configurationManager = core.ConfigurationManager('./channel_configurations.xml')
         self.objectiveStore = core.ObjectiveStore(parent=self) # todo: add widget to select/save objective save
-        self.streamHandler = core.StreamHandler(display_resolution_scaling=DEFAULT_DISPLAY_CROP/100)
+        self.whiteBalanceController = core.WhiteBalanceController(
+            enabled=SOFTWARE_WHITE_BALANCE_ENABLED,
+            gains=(SOFTWARE_WHITE_BALANCE_R, SOFTWARE_WHITE_BALANCE_G, SOFTWARE_WHITE_BALANCE_B),
+        )
+        self.streamHandler = core.StreamHandler(
+            display_resolution_scaling=DEFAULT_DISPLAY_CROP/100,
+            whiteBalanceController=self.whiteBalanceController,
+        )
         self.liveController = core.LiveController(self.camera,self.microcontroller,self.configurationManager)
         self.navigationController = core.NavigationController(self.microcontroller,self.objectiveStore)
         self.autofocusController = core.AutoFocusController(self.camera,self.navigationController,self.liveController)
         self.scanCoordinates = core.ScanCoordinates()
-        self.multipointController = core.MultiPointController(self.camera,self.navigationController,self.liveController,self.autofocusController,self.configurationManager,scanCoordinates=self.scanCoordinates,parent=self)
+        self.multipointController = core.MultiPointController(
+            self.camera,
+            self.navigationController,
+            self.liveController,
+            self.autofocusController,
+            self.configurationManager,
+            scanCoordinates=self.scanCoordinates,
+            parent=self,
+            whiteBalanceController=self.whiteBalanceController,
+        )
         if ENABLE_TRACKING:
             self.trackingController = core.TrackingController(self.camera,self.microcontroller,self.navigationController,self.configurationManager,self.liveController,self.autofocusController,self.imageDisplayWindow)
         self.imageSaver = core.ImageSaver(image_format=Acquisition.IMAGE_FORMAT)
@@ -91,7 +107,12 @@ class OctopiGUI(QMainWindow):
         # load widgets:
         self.objectivesWidget=widgets.ObjectivesWidget(self.objectiveStore)
 
-        self.cameraSettingWidget = widgets.CameraSettingsWidget(self.camera,include_gain_exposure_time=False)
+        self.cameraSettingWidget = widgets.CameraSettingsWidget(
+            self.camera,
+            include_gain_exposure_time=False,
+            whiteBalanceController=self.whiteBalanceController,
+        )
+        self.cameraSettingWidget.set_image_display_window(self.imageDisplayWindow)
         self.liveControlWidget = widgets.LiveControlWidget(self.streamHandler,self.liveController,self.configurationManager,show_trigger_options=True,show_display_options=True,show_autolevel=SHOW_AUTOLEVEL_BTN,autolevel=AUTOLEVEL_DEFAULT_SETTING)
         self.navigationWidget = widgets.NavigationWidget(self.navigationController)
         self.dacControlWidget = widgets.DACControWidget(self.microcontroller)

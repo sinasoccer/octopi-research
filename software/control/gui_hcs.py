@@ -138,7 +138,14 @@ class OctopiGUI(QMainWindow):
         self.objectiveStore = core.ObjectiveStore(parent=self)
         self.configurationManager = core.ConfigurationManager(filename='./channel_configurations.xml')
         self.contrastManager = core.ContrastManager()
-        self.streamHandler = core.StreamHandler(display_resolution_scaling=DEFAULT_DISPLAY_CROP/100)
+        self.whiteBalanceController = core.WhiteBalanceController(
+            enabled=SOFTWARE_WHITE_BALANCE_ENABLED,
+            gains=(SOFTWARE_WHITE_BALANCE_R, SOFTWARE_WHITE_BALANCE_G, SOFTWARE_WHITE_BALANCE_B),
+        )
+        self.streamHandler = core.StreamHandler(
+            display_resolution_scaling=DEFAULT_DISPLAY_CROP/100,
+            whiteBalanceController=self.whiteBalanceController,
+        )
         self.liveController = core.LiveController(self.camera, self.microcontroller, self.configurationManager, parent=self)
         if USE_PRIOR_STAGE:
             self.navigationController = NavigationController_PriorStage(self.priorstage, self.microcontroller, self.objectiveStore, parent=self)
@@ -147,7 +154,16 @@ class OctopiGUI(QMainWindow):
         self.slidePositionController = core.SlidePositionController(self.navigationController, self.liveController, is_for_wellplate=True)
         self.autofocusController = core.AutoFocusController(self.camera, self.navigationController, self.liveController)
         self.scanCoordinates = core.ScanCoordinates()
-        self.multipointController = core.MultiPointController(self.camera, self.navigationController, self.liveController, self.autofocusController, self.configurationManager, scanCoordinates=self.scanCoordinates, parent=self)
+        self.multipointController = core.MultiPointController(
+            self.camera,
+            self.navigationController,
+            self.liveController,
+            self.autofocusController,
+            self.configurationManager,
+            scanCoordinates=self.scanCoordinates,
+            parent=self,
+            whiteBalanceController=self.whiteBalanceController,
+        )
         self.imageSaver = core.ImageSaver()
         self.imageDisplay = core.ImageDisplay()
         if ENABLE_TRACKING:
@@ -161,7 +177,16 @@ class OctopiGUI(QMainWindow):
             self.configurationManager_focus_camera = core.ConfigurationManager(filename='./focus_camera_configurations.xml')
             self.streamHandler_focus_camera = core.StreamHandler()
             self.liveController_focus_camera = core.LiveController(self.camera_focus,self.microcontroller,self.configurationManager_focus_camera, self, control_illumination=False,for_displacement_measurement=True)
-            self.multipointController = core.MultiPointController(self.camera,self.navigationController,self.liveController,self.autofocusController,self.configurationManager,scanCoordinates=self.scanCoordinates,parent=self)
+            self.multipointController = core.MultiPointController(
+                self.camera,
+                self.navigationController,
+                self.liveController,
+                self.autofocusController,
+                self.configurationManager,
+                scanCoordinates=self.scanCoordinates,
+                parent=self,
+                whiteBalanceController=self.whiteBalanceController,
+            )
             self.imageDisplayWindow_focus = core.ImageDisplayWindow(draw_crosshairs=True, show_LUT=False, autoLevels=False)
             self.displacementMeasurementController = core_displacement_measurement.DisplacementMeasurementController()
             self.laserAutofocusController = core.LaserAutofocusController(self.microcontroller,self.camera_focus,self.liveController_focus_camera,self.navigationController,has_two_interfaces=HAS_TWO_INTERFACES,use_glass_top=USE_GLASS_TOP,look_for_cache=False)
@@ -350,9 +375,21 @@ class OctopiGUI(QMainWindow):
             self.nl5Wdiget = NL5Widget.NL5Widget(self.nl5)
 
         if CAMERA_TYPE == "Toupcam":
-            self.cameraSettingWidget = widgets.CameraSettingsWidget(self.camera, include_gain_exposure_time=False, include_camera_temperature_setting=True, include_camera_auto_wb_setting=False)
+            self.cameraSettingWidget = widgets.CameraSettingsWidget(
+                self.camera,
+                include_gain_exposure_time=False,
+                include_camera_temperature_setting=True,
+                include_camera_auto_wb_setting=False,
+                whiteBalanceController=self.whiteBalanceController,
+            )
         else:
-            self.cameraSettingWidget = widgets.CameraSettingsWidget(self.camera, include_gain_exposure_time=False, include_camera_temperature_setting=False, include_camera_auto_wb_setting=True)
+            self.cameraSettingWidget = widgets.CameraSettingsWidget(
+                self.camera,
+                include_gain_exposure_time=False,
+                include_camera_temperature_setting=False,
+                include_camera_auto_wb_setting=True,
+                whiteBalanceController=self.whiteBalanceController,
+            )
         self.liveControlWidget = widgets.LiveControlWidget(self.streamHandler, self.liveController, self.configurationManager, show_display_options=True, show_autolevel=True, autolevel=True)
         self.navigationWidget = widgets.NavigationWidget(self.navigationController, self.slidePositionController, widget_configuration=f'{WELLPLATE_FORMAT} well plate')
         self.navigationBarWidget = widgets.NavigationBarWidget(self.navigationController, self.slidePositionController, add_z_buttons=False)
@@ -399,6 +436,9 @@ class OctopiGUI(QMainWindow):
             self.napariMosaicDisplayWidget = None
         else:
             self.setupImageDisplayTabs()
+
+        if hasattr(self, 'cameraSettingWidget') and hasattr(self, 'imageDisplayWindow'):
+            self.cameraSettingWidget.set_image_display_window(self.imageDisplayWindow)
 
         self.multiPointWidget = widgets.MultiPointWidget(self.multipointController, self.configurationManager)
         self.multiPointWidget2 = widgets.MultiPointWidget2(self.navigationController, self.navigationViewer, self.multipointController, self.configurationManager, scanCoordinates=None)

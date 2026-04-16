@@ -685,6 +685,11 @@ AWB_RATIOS_R = 1.375
 AWB_RATIOS_G = 1
 AWB_RATIOS_B = 1.4141
 
+SOFTWARE_WHITE_BALANCE_ENABLED = False
+SOFTWARE_WHITE_BALANCE_R = 1.0
+SOFTWARE_WHITE_BALANCE_G = 1.0
+SOFTWARE_WHITE_BALANCE_B = 1.0
+
 try:
     with open("cache/config_file_path.txt", 'r') as file:
         for line in file:

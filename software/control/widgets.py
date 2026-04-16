@@ -60,6 +60,166 @@ class CollapsibleGroupBox(QGroupBox):
         self.content_widget.setVisible(state)
 
 
+class SoftwareWhiteBalanceWidget(QFrame):
+    def __init__(self, whiteBalanceController, main=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.whiteBalanceController = whiteBalanceController
+        self.imageDisplayWindow = None
+        self._build_ui()
+        self.refresh_from_controller()
+        self.setFrameStyle(QFrame.Panel | QFrame.Raised)
+
+    def _build_ui(self):
+        self.checkbox_enable = QCheckBox("Enable Software White Balance")
+        self.checkbox_enable.toggled.connect(self.toggle_enabled)
+
+        self.btn_auto = QPushButton("Auto From Current RGB Frame")
+        self.btn_auto.clicked.connect(self.auto_balance)
+
+        self.btn_toggle_background_roi = QPushButton("Show Background ROI")
+        self.btn_toggle_background_roi.setCheckable(True)
+        self.btn_toggle_background_roi.toggled.connect(self.toggle_background_roi)
+
+        self.btn_auto_background = QPushButton("Auto From Background ROI")
+        self.btn_auto_background.clicked.connect(self.auto_balance_from_background_roi)
+
+        self.btn_reset = QPushButton("Reset")
+        self.btn_reset.clicked.connect(self.reset_gains)
+
+        self.entry_gain_r = self._build_gain_spinbox()
+        self.entry_gain_g = self._build_gain_spinbox()
+        self.entry_gain_b = self._build_gain_spinbox()
+
+        self.entry_gain_r.valueChanged.connect(lambda value: self.set_manual_gain("r", value))
+        self.entry_gain_g.valueChanged.connect(lambda value: self.set_manual_gain("g", value))
+        self.entry_gain_b.valueChanged.connect(lambda value: self.set_manual_gain("b", value))
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(self.checkbox_enable)
+        top_row.addStretch()
+        top_row.addWidget(self.btn_auto)
+        top_row.addWidget(self.btn_toggle_background_roi)
+        top_row.addWidget(self.btn_auto_background)
+        top_row.addWidget(self.btn_reset)
+
+        gains_row = QHBoxLayout()
+        gains_row.addWidget(QLabel("R Gain"))
+        gains_row.addWidget(self.entry_gain_r)
+        gains_row.addWidget(QLabel("G Gain"))
+        gains_row.addWidget(self.entry_gain_g)
+        gains_row.addWidget(QLabel("B Gain"))
+        gains_row.addWidget(self.entry_gain_b)
+
+        layout = QVBoxLayout()
+        layout.addLayout(top_row)
+        layout.addLayout(gains_row)
+        self.setLayout(layout)
+        self._sync_background_roi_controls()
+
+    def _build_gain_spinbox(self):
+        spinbox = QDoubleSpinBox()
+        spinbox.setRange(0.25, 4.0)
+        spinbox.setSingleStep(0.05)
+        spinbox.setDecimals(3)
+        return spinbox
+
+    def refresh_from_controller(self):
+        enabled = self.whiteBalanceController.is_enabled()
+        gains = self.whiteBalanceController.get_gains()
+
+        for widget, value in (
+            (self.entry_gain_r, gains[0]),
+            (self.entry_gain_g, gains[1]),
+            (self.entry_gain_b, gains[2]),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+
+        self.checkbox_enable.blockSignals(True)
+        self.checkbox_enable.setChecked(enabled)
+        self.checkbox_enable.blockSignals(False)
+
+        if self.imageDisplayWindow is not None:
+            self.btn_toggle_background_roi.setText(
+                "Hide Background ROI" if self.imageDisplayWindow.is_roi_selector_visible() else "Show Background ROI"
+            )
+            self.btn_toggle_background_roi.blockSignals(True)
+            self.btn_toggle_background_roi.setChecked(self.imageDisplayWindow.is_roi_selector_visible())
+            self.btn_toggle_background_roi.blockSignals(False)
+
+    def toggle_enabled(self, checked):
+        self.whiteBalanceController.set_enabled(checked)
+
+    def set_image_display_window(self, imageDisplayWindow):
+        self.imageDisplayWindow = imageDisplayWindow
+        self._sync_background_roi_controls()
+        self.refresh_from_controller()
+
+    def _sync_background_roi_controls(self):
+        has_display_window = self.imageDisplayWindow is not None
+        self.btn_toggle_background_roi.setEnabled(has_display_window)
+        self.btn_auto_background.setEnabled(has_display_window)
+        if not has_display_window:
+            self.btn_toggle_background_roi.blockSignals(True)
+            self.btn_toggle_background_roi.setChecked(False)
+            self.btn_toggle_background_roi.blockSignals(False)
+
+    def toggle_background_roi(self, checked):
+        if self.imageDisplayWindow is None:
+            return
+        self.imageDisplayWindow.set_roi_selector_visible(checked)
+        self.btn_toggle_background_roi.setText("Hide Background ROI" if checked else "Show Background ROI")
+
+    def set_manual_gain(self, channel, value):
+        kwargs = {channel: value}
+        self.whiteBalanceController.set_gains(**kwargs)
+        self.whiteBalanceController.set_enabled(True)
+
+        if not self.checkbox_enable.isChecked():
+            self.checkbox_enable.blockSignals(True)
+            self.checkbox_enable.setChecked(True)
+            self.checkbox_enable.blockSignals(False)
+
+    def auto_balance(self):
+        gains = self.whiteBalanceController.auto_balance_from_reference()
+        if gains is None:
+            QMessageBox.information(
+                self,
+                "White Balance",
+                "No RGB frame is available yet. Start live view on a brightfield color image first.",
+            )
+            return
+
+        self.refresh_from_controller()
+
+    def auto_balance_from_background_roi(self):
+        if self.imageDisplayWindow is None:
+            QMessageBox.information(
+                self,
+                "White Balance",
+                "Background ROI calibration is only available in the standard image viewer.",
+            )
+            return
+
+        gains = self.whiteBalanceController.auto_balance_from_background_roi(
+            self.imageDisplayWindow.get_roi_bounding_box()
+        )
+        if gains is None:
+            QMessageBox.information(
+                self,
+                "White Balance",
+                "No RGB frame is available yet, or the ROI is empty. Start live view and place the ROI over a blank background region first.",
+            )
+            return
+
+        self.refresh_from_controller()
+
+    def reset_gains(self):
+        self.whiteBalanceController.reset()
+        self.refresh_from_controller()
+
+
 class ConfigEditorForAcquisitions(QDialog):
     def __init__(self, configManager, only_z_offset=True):
         super().__init__()
@@ -633,10 +793,11 @@ class FocusMapWidget(QWidget):
 
 class CameraSettingsWidget(QFrame):
 
-    def __init__(self, camera, include_gain_exposure_time = False, include_camera_temperature_setting = False, include_camera_auto_wb_setting = False, main=None, *args, **kwargs):
+    def __init__(self, camera, include_gain_exposure_time = False, include_camera_temperature_setting = False, include_camera_auto_wb_setting = False, whiteBalanceController=None, main=None, *args, **kwargs):
 
         super().__init__(*args, **kwargs)
         self.camera = camera
+        self.whiteBalanceController = whiteBalanceController
         self.add_components(include_gain_exposure_time,include_camera_temperature_setting,include_camera_auto_wb_setting)
         # set frame style
         self.setFrameStyle(QFrame.Panel | QFrame.Raised)
@@ -795,15 +956,31 @@ class CameraSettingsWidget(QFrame):
             except AttributeError:
                 pass
 
-            if is_color is True:
-                # auto white balance
-                self.btn_auto_wb = QPushButton('Auto White Balance')
-                self.btn_auto_wb.setCheckable(True)
-                self.btn_auto_wb.setChecked(False)
-                self.btn_auto_wb.clicked.connect(self.toggle_auto_wb)
-                print(self.camera.get_balance_white_auto())
+            auto_wb_supported = all(
+                hasattr(self.camera, attr)
+                for attr in ('set_balance_white_auto', 'get_balance_white_auto')
+            )
 
-                self.camera_layout.addLayout(grid_camera_setting_wb)
+            if is_color is True and auto_wb_supported:
+                auto_wb_line = QHBoxLayout()
+                auto_wb_line.addWidget(QLabel('Camera Auto White Balance'))
+
+                self.btn_auto_wb = QPushButton('Continuous')
+                self.btn_auto_wb.setCheckable(True)
+                current_auto_wb = self.camera.get_balance_white_auto()
+                self.btn_auto_wb.setChecked(current_auto_wb not in (None, 0))
+                self.btn_auto_wb.clicked.connect(self.toggle_auto_wb)
+                auto_wb_line.addWidget(self.btn_auto_wb)
+
+                self.btn_auto_wb_once = QPushButton('One Push')
+                self.btn_auto_wb_once.clicked.connect(self.run_auto_wb_once)
+                auto_wb_line.addWidget(self.btn_auto_wb_once)
+
+                self.camera_layout.addLayout(auto_wb_line)
+
+        if self.whiteBalanceController is not None:
+            self.softwareWhiteBalanceWidget = SoftwareWhiteBalanceWidget(self.whiteBalanceController)
+            self.camera_layout.addWidget(self.softwareWhiteBalanceWidget)
 
         self.setLayout(self.camera_layout)
 
@@ -813,6 +990,16 @@ class CameraSettingsWidget(QFrame):
             self.camera.set_balance_white_auto(1)
         else:
             self.camera.set_balance_white_auto(0)
+
+    def run_auto_wb_once(self):
+        try:
+            self.camera.set_balance_white_auto(2)
+        except AttributeError:
+            pass
+
+    def set_image_display_window(self, imageDisplayWindow):
+        if hasattr(self, 'softwareWhiteBalanceWidget'):
+            self.softwareWhiteBalanceWidget.set_image_display_window(imageDisplayWindow)
 
     def set_exposure_time(self,exposure_time):
         self.entry_exposureTime.setValue(exposure_time)
@@ -7791,4 +7978,3 @@ class SampleSettingsWidget(QFrame):
 
         with open('cache/objective_and_sample_format.txt', 'w') as f:
             json.dump(data, f)
-

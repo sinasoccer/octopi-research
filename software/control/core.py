@@ -86,6 +86,233 @@ class ObjectiveStore:
             pixel_binning = 1
         return pixel_binning
 
+
+class WhiteBalanceController:
+    def __init__(self, enabled=False, gains=(1.0, 1.0, 1.0), settings_path='cache/software_white_balance.json'):
+        self._enabled = enabled
+        self._gains = np.array(gains, dtype=np.float32)
+        self._reference_image = None
+        self._latest_rgb_image = None
+        self._lock = Lock()
+        self._settings_path = settings_path
+        self._load_state()
+
+    @staticmethod
+    def _is_rgb_image(image):
+        return image is not None and image.ndim == 3 and image.shape[2] == 3
+
+    @staticmethod
+    def _looks_monochromatic(image):
+        if not WhiteBalanceController._is_rgb_image(image):
+            return False
+        channel_means = image.reshape(-1, 3).astype(np.float32).mean(axis=0)
+        sorted_means = np.sort(channel_means)
+        return sorted_means[-1] > 2.0 * max(sorted_means[-2], 1e-6)
+
+    def is_enabled(self):
+        with self._lock:
+            return self._enabled
+
+    def _load_state(self):
+        if not self._settings_path or not os.path.exists(self._settings_path):
+            return
+
+        try:
+            with open(self._settings_path, 'r') as handle:
+                state = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            return
+
+        gains = state.get('gains')
+        enabled = state.get('enabled')
+        if isinstance(gains, list) and len(gains) == 3:
+            self._gains = np.array(gains, dtype=np.float32)
+        if enabled is not None:
+            self._enabled = bool(enabled)
+
+    def _save_state(self):
+        if not self._settings_path:
+            return
+
+        directory = os.path.dirname(self._settings_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+        with self._lock:
+            state = {
+                'enabled': self._enabled,
+                'gains': [float(value) for value in self._gains],
+            }
+
+        try:
+            with open(self._settings_path, 'w') as handle:
+                json.dump(state, handle)
+        except OSError:
+            pass
+
+    def set_enabled(self, enabled):
+        with self._lock:
+            self._enabled = bool(enabled)
+        self._save_state()
+
+    def get_gains(self):
+        with self._lock:
+            return tuple(float(value) for value in self._gains)
+
+    def set_gains(self, r=None, g=None, b=None):
+        with self._lock:
+            if r is not None:
+                self._gains[0] = max(0.01, float(r))
+            if g is not None:
+                self._gains[1] = max(0.01, float(g))
+            if b is not None:
+                self._gains[2] = max(0.01, float(b))
+        self._save_state()
+
+    def reset(self):
+        with self._lock:
+            self._gains[:] = 1.0
+            self._enabled = False
+        self._save_state()
+
+    def has_reference_image(self):
+        with self._lock:
+            return self._reference_image is not None
+
+    def has_latest_rgb_image(self):
+        with self._lock:
+            return self._latest_rgb_image is not None
+
+    def update_reference_image(self, image):
+        if not self._is_rgb_image(image):
+            return
+
+        step_y = max(1, image.shape[0] // 512)
+        step_x = max(1, image.shape[1] // 512)
+        sampled = np.ascontiguousarray(image[::step_y, ::step_x, :3])
+        if self._looks_monochromatic(sampled):
+            return
+
+        with self._lock:
+            self._latest_rgb_image = image
+            self._reference_image = sampled
+
+    def _crop_image_by_bbox(self, image, roi_bounds):
+        if image is None or roi_bounds is None:
+            return None
+
+        x, y, width, height = roi_bounds
+        x = int(round(x))
+        y = int(round(y))
+        width = int(round(width))
+        height = int(round(height))
+
+        xmin = max(0, x)
+        ymin = max(0, y)
+        xmax = min(image.shape[1], x + max(1, width))
+        ymax = min(image.shape[0], y + max(1, height))
+
+        if xmin >= xmax or ymin >= ymax:
+            return None
+
+        return image[ymin:ymax, xmin:xmax]
+
+    def auto_balance_from_reference(self):
+        with self._lock:
+            if self._reference_image is None:
+                return None
+            gains = self.estimate_gains(self._reference_image)
+            self._gains[:] = gains
+            self._enabled = True
+        self._save_state()
+        return tuple(float(value) for value in gains)
+
+    def auto_balance_from_background_roi(self, roi_bounds):
+        with self._lock:
+            image = self._latest_rgb_image
+
+        roi_image = self._crop_image_by_bbox(image, roi_bounds)
+        if roi_image is None or not self._is_rgb_image(roi_image):
+            return None
+
+        gains = self.estimate_background_gains(roi_image)
+
+        with self._lock:
+            self._gains[:] = gains
+            self._enabled = True
+
+        self._save_state()
+        return tuple(float(value) for value in gains)
+
+    def estimate_gains(self, image):
+        rgb = image.astype(np.float32, copy=False)
+        flat = rgb.reshape(-1, 3)
+        if flat.size == 0:
+            return np.ones(3, dtype=np.float32)
+
+        intensity = flat.mean(axis=1)
+        lower = np.percentile(intensity, 70)
+        upper = np.percentile(intensity, 99.5)
+        mask = (intensity >= lower) & (intensity <= upper)
+
+        if np.count_nonzero(mask) < 32:
+            lower = np.percentile(intensity, 50)
+            mask = intensity >= lower
+
+        if np.count_nonzero(mask) == 0:
+            mask = np.ones(intensity.shape, dtype=bool)
+
+        channel_means = flat[mask].mean(axis=0)
+        channel_means = np.maximum(channel_means, 1e-6)
+        gains = channel_means.mean() / channel_means
+
+        # Keep green as the anchor channel so exposure does not jump around.
+        gains /= gains[1]
+        return np.clip(gains, 0.25, 4.0).astype(np.float32)
+
+    def estimate_background_gains(self, image):
+        rgb = image.astype(np.float32, copy=False)
+        flat = rgb.reshape(-1, 3)
+        if flat.size == 0:
+            return np.ones(3, dtype=np.float32)
+
+        intensity = flat.mean(axis=1)
+        lower = np.percentile(intensity, 60)
+        upper = np.percentile(intensity, 99.9)
+        mask = (intensity >= lower) & (intensity <= upper)
+
+        if np.count_nonzero(mask) < 16:
+            mask = intensity >= np.percentile(intensity, 40)
+
+        if np.count_nonzero(mask) == 0:
+            mask = np.ones(intensity.shape, dtype=bool)
+
+        channel_means = flat[mask].mean(axis=0)
+        channel_means = np.maximum(channel_means, 1e-6)
+        gains = channel_means.mean() / channel_means
+        gains /= gains[1]
+        return np.clip(gains, 0.25, 4.0).astype(np.float32)
+
+    def apply(self, image):
+        if not self._is_rgb_image(image):
+            return image
+        if self._looks_monochromatic(image):
+            return image
+
+        with self._lock:
+            if not self._enabled:
+                return image
+            gains = self._gains.copy()
+
+        balanced = image.astype(np.float32, copy=False) * gains.reshape((1, 1, 3))
+
+        if np.issubdtype(image.dtype, np.integer):
+            info = np.iinfo(image.dtype)
+            balanced = np.clip(balanced, info.min, info.max)
+            return balanced.astype(image.dtype)
+
+        return balanced.astype(image.dtype, copy=False)
+
 class StreamHandler(QObject):
 
     image_to_display = Signal(np.ndarray)
@@ -93,7 +320,7 @@ class StreamHandler(QObject):
     packet_image_for_tracking = Signal(np.ndarray, int, float)
     signal_new_frame_received = Signal()
 
-    def __init__(self,crop_width=Acquisition.CROP_WIDTH,crop_height=Acquisition.CROP_HEIGHT,display_resolution_scaling=1):
+    def __init__(self,crop_width=Acquisition.CROP_WIDTH,crop_height=Acquisition.CROP_HEIGHT,display_resolution_scaling=1,whiteBalanceController=None):
         QObject.__init__(self)
         self.fps_display = 1
         self.fps_save = 1
@@ -105,6 +332,7 @@ class StreamHandler(QObject):
         self.crop_width = crop_width
         self.crop_height = crop_height
         self.display_resolution_scaling = display_resolution_scaling
+        self.whiteBalanceController = whiteBalanceController
 
         self.save_image_flag = False
         self.track_flag = False
@@ -172,6 +400,13 @@ class StreamHandler(QObject):
             # added on 1/30/2022
             # @@@ to move to camera
             image_cropped = utils.rotate_and_flip_image(image_cropped,rotate_image_angle=camera.rotate_image_angle,flip_image=camera.flip_image)
+
+            if self.whiteBalanceController is not None and WhiteBalanceController._is_rgb_image(image_cropped):
+                display_width = round(self.crop_width * self.display_resolution_scaling)
+                display_height = round(self.crop_height * self.display_resolution_scaling)
+                display_reference_image = utils.crop_image(image_cropped, display_width, display_height)
+                self.whiteBalanceController.update_reference_image(display_reference_image)
+                image_cropped = self.whiteBalanceController.apply(image_cropped)
 
             # send image to display
             time_now = time.time()
@@ -1715,6 +1950,7 @@ class MultiPointWorker(QObject):
 
         self.merged_image = None
         self.image_count = 0
+        self.whiteBalanceController = self.multiPointController.whiteBalanceController
 
     def update_stats(self, new_stats):
         self.count += 1
@@ -2240,6 +2476,14 @@ class MultiPointWorker(QObject):
         # process the image -  @@@ to move to camera
         image = utils.crop_image(image,self.crop_width,self.crop_height)
         image = utils.rotate_and_flip_image(image,rotate_image_angle=self.camera.rotate_image_angle,flip_image=self.camera.flip_image)
+        if self.whiteBalanceController is not None and WhiteBalanceController._is_rgb_image(image):
+            display_reference_image = utils.crop_image(
+                image,
+                round(self.crop_width*self.display_resolution_scaling),
+                round(self.crop_height*self.display_resolution_scaling),
+            )
+            self.whiteBalanceController.update_reference_image(display_reference_image)
+        image = self.apply_white_balance_if_needed(image)
         image_to_display = utils.crop_image(image,round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling))
         self.image_to_display.emit(image_to_display)
         self.image_to_display_multi.emit(image_to_display,config.illumination_source)
@@ -2404,6 +2648,14 @@ class MultiPointWorker(QObject):
             rgb_image[:, :, 0] = current_round_images['BF LED matrix full_R']
             rgb_image[:, :, 1] = current_round_images['BF LED matrix full_G']
             rgb_image[:, :, 2] = current_round_images['BF LED matrix full_B']
+            if self.whiteBalanceController is not None:
+                display_reference_image = utils.crop_image(
+                    rgb_image,
+                    round(self.crop_width * self.display_resolution_scaling),
+                    round(self.crop_height * self.display_resolution_scaling),
+                )
+                self.whiteBalanceController.update_reference_image(display_reference_image)
+            rgb_image = self.apply_white_balance_if_needed(rgb_image)
 
             # send image to display
             image_to_display = utils.crop_image(rgb_image,round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling))
@@ -2418,20 +2670,36 @@ class MultiPointWorker(QObject):
 
     def handle_rgb_channels(self, images, file_ID, current_path, config, i, j, k):
         for channel in ['BF LED matrix full_R', 'BF LED matrix full_G', 'BF LED matrix full_B']:
-            image_to_display = utils.crop_image(images[channel], round(self.crop_width * self.display_resolution_scaling), round(self.crop_height * self.display_resolution_scaling))
+            if self.whiteBalanceController is not None and WhiteBalanceController._is_rgb_image(images[channel]):
+                display_reference_image = utils.crop_image(
+                    images[channel],
+                    round(self.crop_width * self.display_resolution_scaling),
+                    round(self.crop_height * self.display_resolution_scaling),
+                )
+                self.whiteBalanceController.update_reference_image(display_reference_image)
+            image = self.apply_white_balance_if_needed(images[channel])
+            image_to_display = utils.crop_image(image, round(self.crop_width * self.display_resolution_scaling), round(self.crop_height * self.display_resolution_scaling))
             self.image_to_display.emit(image_to_display)
             self.image_to_display_multi.emit(image_to_display, config.illumination_source)
 
-            self.update_napari(images[channel], channel, i, j, k)
+            self.update_napari(image, channel, i, j, k)
 
-            file_name = file_ID + '_' + channel.replace(' ', '_') + ('.tiff' if images[channel].dtype == np.uint16 else '.' + Acquisition.IMAGE_FORMAT)
-            iio.imwrite(os.path.join(current_path, file_name), images[channel])
+            file_name = file_ID + '_' + channel.replace(' ', '_') + ('.tiff' if image.dtype == np.uint16 else '.' + Acquisition.IMAGE_FORMAT)
+            iio.imwrite(os.path.join(current_path, file_name), image)
 
     def construct_rgb_image(self, images, file_ID, current_path, config, i, j, k):
         rgb_image = np.zeros((*images['BF LED matrix full_R'].shape, 3), dtype=images['BF LED matrix full_R'].dtype)
         rgb_image[:, :, 0] = images['BF LED matrix full_R']
         rgb_image[:, :, 1] = images['BF LED matrix full_G']
         rgb_image[:, :, 2] = images['BF LED matrix full_B']
+        if self.whiteBalanceController is not None:
+            display_reference_image = utils.crop_image(
+                rgb_image,
+                round(self.crop_width * self.display_resolution_scaling),
+                round(self.crop_height * self.display_resolution_scaling),
+            )
+            self.whiteBalanceController.update_reference_image(display_reference_image)
+        rgb_image = self.apply_white_balance_if_needed(rgb_image)
 
         # send image to display
         image_to_display = utils.crop_image(rgb_image, round(self.crop_width * self.display_resolution_scaling), round(self.crop_height * self.display_resolution_scaling))
@@ -2444,6 +2712,14 @@ class MultiPointWorker(QObject):
         print('writing RGB image')
         file_name = file_ID + '_BF_LED_matrix_full_RGB' + ('.tiff' if rgb_image.dtype == np.uint16 else '.' + Acquisition.IMAGE_FORMAT)
         iio.imwrite(os.path.join(current_path, file_name), rgb_image)
+
+    def apply_white_balance_if_needed(self, image):
+        if self.whiteBalanceController is None:
+            return image
+        if not WhiteBalanceController._is_rgb_image(image):
+            return image
+
+        return self.whiteBalanceController.apply(image)
 
     def handle_acquisition_abort(self, current_path, region_id=0):
         self.move_to_coordinate(self.scan_coordinates_mm[region_id])
@@ -2582,7 +2858,7 @@ class MultiPointController(QObject):
     signal_acquisition_progress = Signal(int, int, int)
     signal_region_progress = Signal(int, int)
 
-    def __init__(self,camera,navigationController,liveController,autofocusController,configurationManager,usb_spectrometer=None,scanCoordinates=None,parent=None):
+    def __init__(self,camera,navigationController,liveController,autofocusController,configurationManager,usb_spectrometer=None,scanCoordinates=None,parent=None,whiteBalanceController=None):
         QObject.__init__(self)
 
         self.camera = camera
@@ -2624,6 +2900,7 @@ class MultiPointController(QObject):
         self.selected_configurations = []
         self.usb_spectrometer = usb_spectrometer
         self.scanCoordinates = scanCoordinates
+        self.whiteBalanceController = whiteBalanceController
         self.scan_coordinates_mm = []
         self.scan_coordinates_name = []
         self.parent = parent
@@ -3453,6 +3730,7 @@ class ImageDisplayWindow(QMainWindow):
         self.centroid = None
         self.DrawCrossHairs = False
         self.image_offset = np.array([0, 0])
+        self.last_displayed_image = None
 
         ## Layout
         layout = QGridLayout()
@@ -3507,6 +3785,7 @@ class ImageDisplayWindow(QMainWindow):
 
     # [Rest of the methods remain exactly the same...]
     def display_image(self, image):
+        self.last_displayed_image = image
         if ENABLE_TRACKING:
             image = np.copy(image)
             self.image_height, self.image_width = image.shape[:2]
@@ -3548,6 +3827,15 @@ class ImageDisplayWindow(QMainWindow):
 
     def hide_ROI_selector(self):
         self.ROI.hide()
+
+    def set_roi_selector_visible(self, visible):
+        if visible:
+            self.show_ROI_selector()
+        else:
+            self.hide_ROI_selector()
+
+    def is_roi_selector_visible(self):
+        return self.ROI.isVisible()
 
     def get_roi(self):
         return self.roi_pos,self.roi_size

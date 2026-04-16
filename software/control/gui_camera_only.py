@@ -13,6 +13,7 @@ import control.widgets as widgets
 import control.camera as camera
 import control.core as core
 import control.microcontroller as microcontroller
+from control._def import *
 
 class OctopiGUI(QMainWindow):
 
@@ -27,7 +28,11 @@ class OctopiGUI(QMainWindow):
 		self.microcontroller = microcontroller.Microcontroller_Simulation()
 		
 		self.configurationManager = core.ConfigurationManager()
-		self.streamHandler = core.StreamHandler()
+		self.whiteBalanceController = core.WhiteBalanceController(
+			enabled=SOFTWARE_WHITE_BALANCE_ENABLED,
+			gains=(SOFTWARE_WHITE_BALANCE_R, SOFTWARE_WHITE_BALANCE_G, SOFTWARE_WHITE_BALANCE_B),
+		)
+		self.streamHandler = core.StreamHandler(whiteBalanceController=self.whiteBalanceController)
 		self.liveController = core.LiveController(self.camera,self.microcontroller,self.configurationManager)
 		self.imageSaver = core.ImageSaver()
 		self.imageDisplay = core.ImageDisplay()
@@ -40,7 +45,10 @@ class OctopiGUI(QMainWindow):
 		self.camera.enable_callback()
 
 		# load widgets
-		self.cameraSettingWidget = widgets.CameraSettingsWidget(self.camera,self.liveController)
+		self.cameraSettingWidget = widgets.CameraSettingsWidget(
+			self.camera,
+			whiteBalanceController=self.whiteBalanceController,
+		)
 		self.liveControlWidget = widgets.LiveControlWidget(self.streamHandler,self.liveController,self.configurationManager)
 		self.recordingControlWidget = widgets.RecordingWidget(self.streamHandler,self.imageSaver)
 
@@ -58,6 +66,7 @@ class OctopiGUI(QMainWindow):
 		# load window
 		self.imageDisplayWindow = core.ImageDisplayWindow()
 		self.imageDisplayWindow.show()
+		self.cameraSettingWidget.set_image_display_window(self.imageDisplayWindow)
 
 		# make connections
 		self.streamHandler.signal_new_frame_received.connect(self.liveController.on_new_frame)
