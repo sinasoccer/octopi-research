@@ -2372,8 +2372,8 @@ class SlideScanAcquisitionWidget(QFrame):
     def add_components(self):
         self.scanWidget.btn_startAcquisition.setText("Start Scan")
         self.scanWidget.btn_startAcquisition.setMinimumHeight(52)
-        self.scanWidget.btn_show_scan_planner.setText("Select Scan Area")
-        self.scanWidget.btn_center_scan_planner.setText("Center Area Here")
+        self.scanWidget.btn_show_scan_planner.setText("Select Path")
+        self.scanWidget.btn_center_scan_planner.setText("Reset to Current View")
         self.scanWidget.checkbox_withAutofocus.setText("Refocus During Scan")
         self.scanWidget.checkbox_genFocusMap.setText("Use Focus Map")
         self.scanWidget.checkbox_hybridAutofocus.setText("Hybrid Focus Correction")
@@ -2417,14 +2417,16 @@ class SlideScanAcquisitionWidget(QFrame):
         geometry_row.addWidget(QLabel("Shape"))
         geometry_row.addWidget(self.scanWidget.combobox_shape)
 
+        planner_hint = QLabel(
+            "Click Select Path, then drag the scan box over the blood film. Slide scans start at the top-right corner."
+        )
+        planner_hint.setWordWrap(True)
+        planner_hint.setStyleSheet("color: #58606B;")
+
         planner_row = QHBoxLayout()
-        planner_row.addWidget(QLabel("Region Path"))
-        planner_row.addWidget(self.scanWidget.dropdown_region_path)
-        planner_row.addWidget(QLabel("Tile Path"))
-        planner_row.addWidget(self.scanWidget.dropdown_tile_path)
-        planner_row.addStretch(1)
         planner_row.addWidget(self.scanWidget.btn_show_scan_planner)
         planner_row.addWidget(self.scanWidget.btn_center_scan_planner)
+        planner_row.addStretch(1)
 
         autofocus_row = QHBoxLayout()
         autofocus_row.addWidget(self.scanWidget.checkbox_withAutofocus)
@@ -2487,6 +2489,7 @@ class SlideScanAcquisitionWidget(QFrame):
         layout.addLayout(preset_row)
         layout.addLayout(meta_row)
         layout.addLayout(geometry_row)
+        layout.addWidget(planner_hint)
         layout.addLayout(planner_row)
         layout.addLayout(autofocus_row)
         layout.addWidget(channels_group)
@@ -4327,9 +4330,34 @@ class MultiPointWidgetGrid(QFrame):
             [x_min_mm, y_min_mm + height_mm],
         ], dtype=np.float32)
 
+    def _is_slide_sample(self):
+        return 'glass slide' in self.navigationViewer.sample
+
+    def _order_scan_points(self, points):
+        if points is None or len(points) == 0:
+            return []
+
+        if isinstance(points, np.ndarray):
+            point_list = [tuple(point.tolist()) for point in points]
+        else:
+            point_list = [tuple(point) for point in points]
+
+        rounded_points = [(round(x, 6), round(y, 6), x, y) for x, y in point_list]
+        rows = []
+        row_keys = sorted({row_y for _, row_y, _, _ in rounded_points}, reverse=self._is_slide_sample())
+
+        for row_index, row_key in enumerate(row_keys):
+            row_points = [(x, y) for rounded_x, rounded_y, x, y in rounded_points if rounded_y == row_key]
+            row_points = sorted(row_points, key=lambda point: point[0], reverse=self._is_slide_sample())
+            if self.fov_pattern == 'S-Pattern' and row_index % 2 == 1:
+                row_points.reverse()
+            rows.extend(row_points)
+
+        return rows
+
     def toggle_scan_planner(self, checked):
         self.scan_planner_active = checked
-        self.btn_show_scan_planner.setText("Hide Scan Box" if checked else "Show Scan Box")
+        self.btn_show_scan_planner.setText("Finish Path" if checked else "Select Path")
         self.navigationViewer.set_scan_planner_roi_visible(checked)
         if checked:
             self.checkbox_useCoordinateAcquisition.setChecked(True)
@@ -4751,17 +4779,18 @@ class MultiPointWidgetGrid(QFrame):
         radius_squared = (scan_size_mm / 2) ** 2
         fov_size_mm_half = fov_size_mm / 2
 
-        for i in range(steps):
+        row_indices = range(steps - 1, -1, -1) if self._is_slide_sample() else range(steps)
+        for row_index, i in enumerate(row_indices):
             row = []
             y = center_y + (i - half_steps) * step_size_mm
-            for j in range(steps):
+            column_indices = range(steps - 1, -1, -1) if self._is_slide_sample() else range(steps)
+            if self.fov_pattern == 'S-Pattern' and row_index % 2 == 1:
+                column_indices = reversed(list(column_indices))
+            for j in column_indices:
                 x = center_x + (j - half_steps) * step_size_mm
                 if shape == 'Square' or (shape == 'Circle' and self._is_in_circle(x, y, center_x, center_y, radius_squared, fov_size_mm_half)):
                     row.append((x, y))
                     self.navigationViewer.register_fov_to_image(x, y)
-
-            if self.fov_pattern == 'S-Pattern' and i % 2 == 1:
-                row.reverse()
             scan_coordinates.extend(row)
 
         if not scan_coordinates and shape == 'Circle':
@@ -4870,23 +4899,14 @@ class MultiPointWidgetGrid(QFrame):
         # Filter points inside the polygon
         valid_points = grid_points[mask]
 
-        # Sort points
-        sorted_indices = np.lexsort((valid_points[:, 0], valid_points[:, 1]))
-        sorted_points = valid_points[sorted_indices]
-
-        # Apply S-Pattern if needed
-        if self.fov_pattern == 'S-Pattern':
-            unique_y = np.unique(sorted_points[:, 1])
-            for i in range(1, len(unique_y), 2):
-                mask = sorted_points[:, 1] == unique_y[i]
-                sorted_points[mask] = sorted_points[mask][::-1]
+        sorted_points = self._order_scan_points(valid_points)
 
         # Register FOVs
         for x, y in sorted_points:
             self.navigationViewer.register_fov_to_image(x, y)
 
         self.signal_update_navigation_viewer.emit()
-        return sorted_points.tolist()
+        return [list(point) for point in sorted_points]
 
     def point_inside_polygon(self, x, y, poly):
         n = len(poly)
@@ -4913,6 +4933,8 @@ class MultiPointWidgetGrid(QFrame):
         def sort_key(item):
             key, coord = item
             if 'manual' in key:
+                if self._is_slide_sample():
+                    return (0, -coord[1], -coord[0])
                 return (0, coord[1], coord[0])  # Manual coords: sort by y, then x
             else:
                 row, col = key[0], int(key[1:])
@@ -4922,7 +4944,10 @@ class MultiPointWidgetGrid(QFrame):
 
         if self.acquisition_pattern == 'S-Pattern':
             # Group by row and reverse alternate rows
-            rows = itertools.groupby(sorted_items, key=lambda x: x[1][1] if 'manual' in x[0] else x[0][0])
+            rows = itertools.groupby(
+                sorted_items,
+                key=lambda x: round(x[1][1], 6) if 'manual' in x[0] or self._is_slide_sample() else x[0][0]
+            )
             sorted_items = []
             for i, (_, group) in enumerate(rows):
                 row = list(group)
