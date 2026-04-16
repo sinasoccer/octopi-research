@@ -667,6 +667,10 @@ SAMPLE_FORMATS_CSV_PATH = 'sample_formats.csv'
 
 OBJECTIVES, WELLPLATE_FORMAT_SETTINGS = load_formats()
 
+DEFAULT_OBJECTIVE = '20x' if '20x' in OBJECTIVES else next(iter(OBJECTIVES))
+DEFAULT_SAMPLE_FORMAT = '96 well plate' if '96 well plate' in WELLPLATE_FORMAT_SETTINGS else next(iter(WELLPLATE_FORMAT_SETTINGS))
+WELLPLATE_FORMAT = DEFAULT_SAMPLE_FORMAT
+
 
 def normalize_sample_format(value, fallback='96 well plate'):
     if value is None:
@@ -778,8 +782,13 @@ else:
         sys.exit(1)
 
 try:
-    config_default_objective = DEFAULT_OBJECTIVE if DEFAULT_OBJECTIVE in OBJECTIVES else '20x'
-    config_default_sample_format = normalize_sample_format(WELLPLATE_FORMAT)
+    config_default_objective = globals().get('DEFAULT_OBJECTIVE', DEFAULT_OBJECTIVE)
+    if config_default_objective not in OBJECTIVES:
+        config_default_objective = DEFAULT_OBJECTIVE
+    config_default_sample_format = normalize_sample_format(
+        globals().get('WELLPLATE_FORMAT', WELLPLATE_FORMAT),
+        fallback=DEFAULT_SAMPLE_FORMAT,
+    )
     with open("cache/objective_and_sample_format.txt", 'r') as f:
         cached_settings = json.load(f)
         DEFAULT_OBJECTIVE = cached_settings.get('objective') if cached_settings.get('objective') in OBJECTIVES else config_default_objective
