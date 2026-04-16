@@ -391,7 +391,7 @@ class OctopiGUI(QMainWindow):
                 whiteBalanceController=self.whiteBalanceController,
             )
         self.liveControlWidget = widgets.LiveControlWidget(self.streamHandler, self.liveController, self.configurationManager, show_display_options=True, show_autolevel=True, autolevel=True)
-        self.navigationWidget = widgets.NavigationWidget(self.navigationController, self.slidePositionController, widget_configuration=f'{WELLPLATE_FORMAT} well plate')
+        self.navigationWidget = widgets.NavigationWidget(self.navigationController, self.slidePositionController, widget_configuration='compact')
         self.navigationBarWidget = widgets.NavigationBarWidget(self.navigationController, self.slidePositionController, add_z_buttons=False)
         self.dacControlWidget = widgets.DACControWidget(self.microcontroller)
         self.autofocusWidget = widgets.AutoFocusWidget(self.autofocusController)
@@ -532,9 +532,9 @@ class OctopiGUI(QMainWindow):
 
     def setupRecordTabWidget(self):
         if ENABLE_SCAN_GRID:
-            self.recordTabWidget.addTab(self.multiPointWidgetGrid, "Wellplate Multipoint")
+            self.recordTabWidget.addTab(self.multiPointWidgetGrid, "Grid / Area Scan")
         if ENABLE_FLEXIBLE_MULTIPOINT:
-            self.recordTabWidget.addTab(self.multiPointWidget2, "Flexible Multipoint")
+            self.recordTabWidget.addTab(self.multiPointWidget2, "Point / ROI Scan")
         if ENABLE_TRACKING:
             self.recordTabWidget.addTab(self.trackingControlWidget, "Tracking")
         if ENABLE_RECORDING:
@@ -610,7 +610,7 @@ class OctopiGUI(QMainWindow):
         dock_display.setStretch(x=100, y=100)
         main_dockArea.addDock(dock_display)
 
-        self.dock_wellSelection = dock.Dock('Well Selector', autoOrientation=False)
+        self.dock_wellSelection = dock.Dock('Region Selector', autoOrientation=False)
         self.dock_wellSelection.showTitleBar()
         if not USE_NAPARI_WELL_SELECTION or self.live_only_mode:
             self.dock_wellSelection.addWidget(self.wellSelectionWidget)

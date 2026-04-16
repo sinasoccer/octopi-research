@@ -3773,11 +3773,11 @@ class MultiPointWidgetGrid(QFrame):
         row_1_layout.addWidget(self.lineEdit_experimentID)
         row_1_layout.addWidget(QLabel('Stain'))
         row_1_layout.addWidget(self.entry_stain)
-        row_1_layout.addWidget(QLabel('Well Shape'))
+        row_1_layout.addWidget(QLabel('Scan Shape'))
         row_1_layout.addWidget(self.combobox_shape)
         main_layout.addLayout(row_1_layout)
 
-        # Well Coverage, Scan Size, and Overlap
+        # Coverage, scan size, and overlap
         row_4_layout = QHBoxLayout()
         row_4_layout.addWidget(QLabel('Size'))
         row_4_layout.addWidget(self.entry_scan_size)
@@ -3785,7 +3785,7 @@ class MultiPointWidgetGrid(QFrame):
         row_4_layout.addWidget(QLabel('FOV Overlap'))
         row_4_layout.addWidget(self.entry_overlap)
         #row_4_layout.addStretch(1)
-        row_4_layout.addWidget(QLabel('Well Coverage'))
+        row_4_layout.addWidget(QLabel('Coverage'))
         row_4_layout.addWidget(self.entry_well_coverage)
         main_layout.addLayout(row_4_layout)
 
@@ -7163,7 +7163,7 @@ class WellplateFormatWidget(QWidget):
 
     def initUI(self):
         layout = QHBoxLayout(self)
-        self.label = QLabel("Sample Format", self)
+        self.label = QLabel("Sample / Carrier", self)
         self.comboBox = QComboBox(self)
         self.populate_combo_box()
         self.comboBox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -7176,7 +7176,7 @@ class WellplateFormatWidget(QWidget):
 
     def populate_combo_box(self):
         self.comboBox.clear()
-        self.comboBox.addItem("glass slide", '0')
+        self.comboBox.addItem("Glass Slide", 0)
         for format_, settings in WELLPLATE_FORMAT_SETTINGS.items():
             self.comboBox.addItem(format_, format_)
 
@@ -7202,7 +7202,7 @@ class WellplateFormatWidget(QWidget):
     def setWellplateSettings(self, wellplate_format):
         if wellplate_format in WELLPLATE_FORMAT_SETTINGS:
             settings = WELLPLATE_FORMAT_SETTINGS[wellplate_format]
-        elif wellplate_format == '0':
+        elif wellplate_format in (0, '0'):
             self.signalWellplateSettings.emit(QVariant(0), 0, 0, 0, 0, 0, 0, 0, 1, 1)
             return
         else:
@@ -7225,7 +7225,7 @@ class WellplateFormatWidget(QWidget):
     def getWellplateSettings(self, wellplate_format):
         if wellplate_format in WELLPLATE_FORMAT_SETTINGS:
             settings = WELLPLATE_FORMAT_SETTINGS[wellplate_format]
-        elif wellplate_format == '0':
+        elif wellplate_format in (0, '0'):
             settings = {
                 'format': '0',
                 'a1_x_mm': 0,

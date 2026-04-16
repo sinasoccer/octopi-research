@@ -4260,9 +4260,78 @@ class NavigationViewer(QFrame):
         self.view = self.graphics_widget.addViewBox(invertX=invertX, invertY=True)
         self.view.setAspectLocked(True)
 
+        self.label_map_title = QLabel("Sample Map")
+        self.label_map_title.setStyleSheet("font-weight: 600;")
+
+        self.label_sample_format = QLabel()
+        self.label_sample_format.setAlignment(Qt.AlignCenter)
+
+        self.label_map_position = QLabel()
+        self.label_map_position.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.label_map_position.setStyleSheet("color: #3B3F46;")
+
+        self.label_map_hint = QLabel()
+        self.label_map_hint.setWordWrap(True)
+        self.label_map_hint.setStyleSheet("color: #60656E;")
+
+        self.label_map_legend = QLabel()
+        self.label_map_legend.setTextFormat(Qt.RichText)
+        self.label_map_legend.setText(
+            "<span style='color:#FF5A5A;'>■</span> Current field&nbsp;&nbsp;"
+            "<span style='color:#FCAE1E;'>■</span> Planned scan"
+        )
+        self.label_map_legend.setStyleSheet("color: #60656E;")
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(self.label_map_title)
+        header_row.addWidget(self.label_sample_format)
+        header_row.addStretch(1)
+        header_row.addWidget(self.label_map_position)
+
+        subheader_row = QHBoxLayout()
+        subheader_row.addWidget(self.label_map_hint, 1)
+        subheader_row.addWidget(self.label_map_legend, 0)
+
         self.grid = QVBoxLayout()
+        self.grid.addLayout(header_row)
+        self.grid.addLayout(subheader_row)
         self.grid.addWidget(self.graphics_widget)
         self.setLayout(self.grid)
+
+    def _sample_display_name(self):
+        if self.sample == 'glass slide':
+            return 'Glass Slide'
+        if self.sample == '4 glass slide':
+            return 'Slide Carrier'
+        if isinstance(self.sample, str) and self.sample.endswith(' well plate'):
+            return self.sample.replace(' well plate', '-well plate')
+        return str(self.sample)
+
+    def _sample_hint_text(self):
+        if 'glass slide' in self.sample:
+            return 'Red overlay shows the current field. Amber boxes show the scan plan.'
+        return 'This map is in plate mode. For peripheral blood films, switch Sample / Carrier to Glass Slide.'
+
+    def refresh_status_labels(self):
+        self.label_sample_format.setText(self._sample_display_name())
+        if 'glass slide' in self.sample:
+            self.label_sample_format.setStyleSheet(
+                "padding: 2px 8px; border-radius: 9px; background: #E8F6EC; color: #1D5D3A;"
+            )
+        else:
+            self.label_sample_format.setStyleSheet(
+                "padding: 2px 8px; border-radius: 9px; background: #FFF1D6; color: #7A4B00;"
+            )
+
+        self.label_map_hint.setText(self._sample_hint_text())
+
+        objective_name = self.objectiveStore.current_objective
+        fov_text = f"FOV {self.fov_size_mm:.2f} mm"
+        if self.x_mm is None or self.y_mm is None:
+            position_text = f"{objective_name} | {fov_text} | stage position unavailable"
+        else:
+            position_text = f"{objective_name} | X {self.x_mm:.2f} mm | Y {self.y_mm:.2f} mm | {fov_text}"
+        self.label_map_position.setText(position_text)
 
     def load_background_image(self, image_path):
         self.view.clear()
@@ -4416,6 +4485,7 @@ class NavigationViewer(QFrame):
         self.update_fov_size()
         if self.scan_planner_bounds_mm is not None and self.scan_planner_roi is not None:
             self.set_scan_planner_bounds_mm(*self.scan_planner_bounds_mm)
+        self.refresh_status_labels()
 
     def update_fov_size(self):
         pixel_size_um = self.objectiveStore.get_pixel_size()
@@ -4424,6 +4494,7 @@ class NavigationViewer(QFrame):
     def on_objective_changed(self):
         self.clear_overlay()
         self.update_fov_size()
+        self.refresh_status_labels()
         if self.x_mm is not None and self.y_mm is not None:
             if 'glass slide'in self.sample:
                 self.signal_update_live_scan_grid.emit(self.x_mm, self.y_mm)
@@ -4436,7 +4507,7 @@ class NavigationViewer(QFrame):
         if isinstance(sample_format, QVariant):
             sample_format = sample_format.value()
 
-        if sample_format == '0':
+        if sample_format in (0, '0'):
             if IS_HCS:
                 sample = '4 glass slide'
             else:
@@ -4470,6 +4541,7 @@ class NavigationViewer(QFrame):
         self.load_background_image(image_path)
         self.create_layers()
         self.update_display_properties(sample)
+        self.refresh_status_labels()
         self.draw_current_fov(self.x_mm, self.y_mm)
 
     def update_current_location(self, x_mm=None, y_mm=None):
@@ -4478,10 +4550,12 @@ class NavigationViewer(QFrame):
 
         elif self.x_mm is not None and self.y_mm is not None:
             # update only when the displacement has exceeded certain value
-            if abs(x_mm - self.x_mm) > self.location_update_threshold_mm or abs(y_mm - self.y_mm) > self.location_update_threshold_mm:
+            should_redraw = abs(x_mm - self.x_mm) > self.location_update_threshold_mm or abs(y_mm - self.y_mm) > self.location_update_threshold_mm
+            self.x_mm = x_mm
+            self.y_mm = y_mm
+            self.refresh_status_labels()
+            if should_redraw:
                 self.draw_current_fov(x_mm, y_mm)
-                self.x_mm = x_mm
-                self.y_mm = y_mm
                 # update_live_scan_grid
                 if 'glass slide'in self.sample and not self.acquisition_started:
                     self.signal_update_live_scan_grid.emit(x_mm, y_mm)
@@ -4489,6 +4563,7 @@ class NavigationViewer(QFrame):
             self.draw_current_fov(x_mm, y_mm)
             self.x_mm = x_mm
             self.y_mm = y_mm
+            self.refresh_status_labels()
             # update_live_scan_grid
             if 'glass slide'in self.sample and not self.acquisition_started:
                 self.signal_update_live_scan_grid.emit(x_mm, y_mm)
@@ -4516,8 +4591,24 @@ class NavigationViewer(QFrame):
 
     def draw_current_fov(self, x_mm, y_mm):
         self.fov_overlay.fill(0)
+        if x_mm is None or y_mm is None:
+            self.fov_overlay_item.setImage(self.fov_overlay)
+            return
         current_FOV_top_left, current_FOV_bottom_right = self.get_FOV_pixel_coordinates(x_mm, y_mm)
-        cv2.rectangle(self.fov_overlay, current_FOV_top_left, current_FOV_bottom_right, (255, 0, 0, 255), self.box_line_thickness)
+        cv2.rectangle(self.fov_overlay, current_FOV_top_left, current_FOV_bottom_right, (255, 90, 90, 64), -1)
+        cv2.rectangle(self.fov_overlay, current_FOV_top_left, current_FOV_bottom_right, (255, 90, 90, 255), max(2, self.box_line_thickness))
+        center = (
+            round((current_FOV_top_left[0] + current_FOV_bottom_right[0]) / 2),
+            round((current_FOV_top_left[1] + current_FOV_bottom_right[1]) / 2),
+        )
+        cv2.drawMarker(
+            self.fov_overlay,
+            center,
+            (255, 255, 255, 255),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=12,
+            thickness=1,
+        )
         self.fov_overlay_item.setImage(self.fov_overlay)
 
     def register_fov(self, x_mm, y_mm):
@@ -4540,6 +4631,7 @@ class NavigationViewer(QFrame):
     def clear_slide(self):
         self.background_image = self.background_image_copy.copy()
         self.background_item.setImage(self.background_image)
+        self.refresh_status_labels()
         self.draw_current_fov(self.x_mm, self.y_mm)
 
     def update_slide(self):

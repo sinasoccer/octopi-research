@@ -667,6 +667,28 @@ SAMPLE_FORMATS_CSV_PATH = 'sample_formats.csv'
 
 OBJECTIVES, WELLPLATE_FORMAT_SETTINGS = load_formats()
 
+
+def normalize_sample_format(value, fallback='96 well plate'):
+    if value is None:
+        return fallback
+
+    if isinstance(value, str):
+        value = value.strip()
+        if value.lower() in ('glass slide', '4 glass slide'):
+            return 0
+        if value in ('0', '0 well plate'):
+            return 0
+        if value.isdigit():
+            value = int(value)
+
+    if isinstance(value, (int, float)):
+        numeric_value = int(value)
+        if numeric_value == 0:
+            return 0
+        value = f'{numeric_value} well plate'
+
+    return value if value in WELLPLATE_FORMAT_SETTINGS else fallback
+
 ##########################################################
 #### start of loading machine specific configurations ####
 ##########################################################
@@ -756,24 +778,32 @@ else:
         sys.exit(1)
 
 try:
+    config_default_objective = DEFAULT_OBJECTIVE if DEFAULT_OBJECTIVE in OBJECTIVES else '20x'
+    config_default_sample_format = normalize_sample_format(WELLPLATE_FORMAT)
     with open("cache/objective_and_sample_format.txt", 'r') as f:
         cached_settings = json.load(f)
-        DEFAULT_OBJECTIVE = cached_settings.get('objective') if cached_settings.get('objective') in OBJECTIVES else '20x'
-        WELLPLATE_FORMAT = str(cached_settings.get('wellplate_format'))
-        WELLPLATE_FORMAT = WELLPLATE_FORMAT + ' well plate' if WELLPLATE_FORMAT.isdigit() else WELLPLATE_FORMAT
-        if WELLPLATE_FORMAT not in WELLPLATE_FORMAT_SETTINGS:
-            WELLPLATE_FORMAT = '96 well plate'
+        DEFAULT_OBJECTIVE = cached_settings.get('objective') if cached_settings.get('objective') in OBJECTIVES else config_default_objective
+        WELLPLATE_FORMAT = normalize_sample_format(cached_settings.get('wellplate_format'), fallback=config_default_sample_format)
 except (FileNotFoundError, json.JSONDecodeError):
-    DEFAULT_OBJECTIVE = '20x'
-    WELLPLATE_FORMAT = '96 well plate'
+    DEFAULT_OBJECTIVE = config_default_objective
+    WELLPLATE_FORMAT = config_default_sample_format
 
-NUMBER_OF_SKIP = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['number_of_skip'] # num rows/cols to skip on wellplate edge
-WELL_SIZE_MM = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['well_size_mm']
-WELL_SPACING_MM = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['well_spacing_mm']
-A1_X_MM = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['a1_x_mm'] # measured stage position - to update
-A1_Y_MM = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['a1_y_mm'] # measured stage position - to update
-A1_X_PIXEL = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['a1_x_pixel'] # coordinate on the png
-A1_Y_PIXEL = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['a1_y_pixel'] # coordinate on the png
+if WELLPLATE_FORMAT == 0:
+    NUMBER_OF_SKIP = 0
+    WELL_SIZE_MM = 0
+    WELL_SPACING_MM = 0
+    A1_X_MM = 0
+    A1_Y_MM = 0
+    A1_X_PIXEL = 0
+    A1_Y_PIXEL = 0
+else:
+    NUMBER_OF_SKIP = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['number_of_skip'] # num rows/cols to skip on wellplate edge
+    WELL_SIZE_MM = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['well_size_mm']
+    WELL_SPACING_MM = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['well_spacing_mm']
+    A1_X_MM = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['a1_x_mm'] # measured stage position - to update
+    A1_Y_MM = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['a1_y_mm'] # measured stage position - to update
+    A1_X_PIXEL = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['a1_x_pixel'] # coordinate on the png
+    A1_Y_PIXEL = WELLPLATE_FORMAT_SETTINGS[WELLPLATE_FORMAT]['a1_y_pixel'] # coordinate on the png
 
 ##########################################################
 ##### end of loading machine specific configurations #####
