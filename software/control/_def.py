@@ -7,6 +7,9 @@ from configparser import ConfigParser
 import json
 import csv
 
+CACHE_DIR = "cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 def conf_attribute_reader(string_value):
     """
     :brief: standardized way for reading config entries
