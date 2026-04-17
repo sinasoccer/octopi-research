@@ -472,6 +472,7 @@ class OctopiGUI(QMainWindow):
             objectivesWidget=self.objectivesWidget,
             cameraSettingsWidget=self.cameraSettingWidget,
             liveControlWidget=self.liveControlWidget,
+            wellplateFormatWidget=self.wellplateFormatWidget,
         )
         self.sampleSettingsWidget = widgets.SampleSettingsWidget(self.objectivesWidget, self.wellplateFormatWidget)
 

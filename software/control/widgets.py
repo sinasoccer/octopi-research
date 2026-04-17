@@ -2849,8 +2849,7 @@ class SlideScanAcquisitionWidget(QFrame):
     def add_components(self):
         self.scanWidget.btn_startAcquisition.setText("Start Scan")
         self.scanWidget.btn_startAcquisition.setMinimumHeight(52)
-        self.scanWidget.btn_load_preset.setText("Load")
-        self.scanWidget.btn_apply_preset.setText("Apply")
+        self.scanWidget.btn_load_preset.setText("Apply")
         self.scanWidget.btn_save_preset.setText("Save")
         self.scanWidget.btn_show_scan_planner.setText("Select Path")
         self.scanWidget.btn_center_scan_planner.setText("Reset to Current View")
@@ -4259,6 +4258,7 @@ class MultiPointWidgetGrid(QFrame):
         objectivesWidget=None,
         cameraSettingsWidget=None,
         liveControlWidget=None,
+        wellplateFormatWidget=None,
         *args,
         **kwargs
     ):
@@ -4272,6 +4272,7 @@ class MultiPointWidgetGrid(QFrame):
         self.objectivesWidget = objectivesWidget
         self.cameraSettingsWidget = cameraSettingsWidget
         self.liveControlWidget = liveControlWidget
+        self.wellplateFormatWidget = wellplateFormatWidget
         self.colorTuningWidget = None
         self.referenceMatchWidget = None
         if napariMosaicWidget is None:
@@ -4326,12 +4327,13 @@ class MultiPointWidgetGrid(QFrame):
         self.entry_preset_name.setPlaceholderText("Preset name")
         self.dropdown_presets = QComboBox()
         self.dropdown_presets.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.btn_load_preset = QPushButton("Load Preset")
+        self.btn_load_preset = QPushButton("Apply Preset")
         self.btn_apply_preset = QPushButton("Apply Preset")
+        self.btn_apply_preset.setVisible(False)
         self.btn_apply_preset.setEnabled(False)
         self.btn_save_preset = QPushButton("Save Preset")
         self.btn_delete_preset = QPushButton("Delete")
-        self.label_preset_status = QLabel("Choose a preset, click Load Preset, then Apply Preset.")
+        self.label_preset_status = QLabel("Choose a preset and click Apply Preset.")
         self.label_preset_status.setWordWrap(True)
         self.label_preset_status.setStyleSheet("color: #58606B;")
 
@@ -4665,7 +4667,7 @@ class MultiPointWidgetGrid(QFrame):
         self.entry_NZ.valueChanged.connect(self.signal_acquisition_z_levels.emit)
         self.dropdown_presets.currentTextChanged.connect(self.clear_pending_preset)
         self.btn_load_preset.clicked.connect(self.load_selected_preset)
-        self.btn_apply_preset.clicked.connect(self.apply_loaded_preset)
+        self.btn_apply_preset.clicked.connect(self.load_selected_preset)
         self.btn_save_preset.clicked.connect(self.save_current_preset)
         self.btn_delete_preset.clicked.connect(self.delete_selected_preset)
 
@@ -4716,10 +4718,11 @@ class MultiPointWidgetGrid(QFrame):
         self.pending_preset_name = None
         self.pending_preset_missing_fields = []
         self.btn_apply_preset.setEnabled(False)
-        self.label_preset_status.setText("Choose a preset, click Load Preset, then Apply Preset.")
+        self.label_preset_status.setText("Choose a preset and click Apply Preset.")
 
     def _get_missing_preset_fields(self, preset_data):
         required_fields = [
+            ('sample_format', 'sample / carrier'),
             ('live_configuration', 'live mode'),
             ('live_exposure_time_ms', 'exposure'),
             ('live_analog_gain', 'analog gain'),
@@ -4748,10 +4751,47 @@ class MultiPointWidgetGrid(QFrame):
             missing_text = ", ".join(self.pending_preset_missing_fields)
             self.label_preset_status.setText(
                 f"Preset loaded: {preset_name}. This is a legacy preset missing {missing_text}. "
-                "Apply it, then re-save once to capture the full workflow."
+                "It was applied, but re-save once to capture the full workflow."
             )
         else:
-            self.label_preset_status.setText(f"Preset loaded: {preset_name}. Click Apply Preset to update the workflow.")
+            self.label_preset_status.setText(f"Preset ready: {preset_name}.")
+
+    def _normalize_sample_format_value(self, sample_format):
+        if isinstance(sample_format, QVariant):
+            sample_format = sample_format.value()
+
+        if isinstance(sample_format, str):
+            sample_format = sample_format.strip()
+            if sample_format.lower() == 'glass slide':
+                return 0
+            if sample_format in ('0', '0 well plate'):
+                return 0
+            if sample_format.isdigit():
+                numeric_sample_format = int(sample_format)
+                return 0 if numeric_sample_format == 0 else f'{numeric_sample_format} well plate'
+            return sample_format
+
+        if isinstance(sample_format, (int, float)):
+            numeric_sample_format = int(sample_format)
+            return 0 if numeric_sample_format == 0 else f'{numeric_sample_format} well plate'
+
+        return sample_format
+
+    def _set_sample_format(self, sample_format):
+        if self.wellplateFormatWidget is None or sample_format is None:
+            return
+
+        normalized_sample_format = self._normalize_sample_format_value(sample_format)
+        combo_box = getattr(self.wellplateFormatWidget, 'comboBox', None)
+        if combo_box is None:
+            return
+
+        target_index = combo_box.findData(normalized_sample_format)
+        if target_index < 0 and normalized_sample_format == 0:
+            target_index = combo_box.findData(0)
+
+        if target_index >= 0 and combo_box.currentIndex() != target_index:
+            combo_box.setCurrentIndex(target_index)
 
     def _set_selected_channels(self, channels):
         selected_channels = set(channels or [])
@@ -4781,6 +4821,7 @@ class MultiPointWidgetGrid(QFrame):
             widget.interpretText()
 
         return {
+            'sample_format': getattr(self.wellplateFormatWidget, 'wellplate_format', None),
             'live_configuration': self.liveControlWidget.dropdown_modeSelection.currentText(),
             'live_exposure_time_ms': float(self.liveControlWidget.entry_exposureTime.value()),
             'live_analog_gain': float(self.liveControlWidget.entry_analogGain.value()),
@@ -4835,6 +4876,7 @@ class MultiPointWidgetGrid(QFrame):
         return preset_data
 
     def apply_preset_data(self, preset_data):
+        self._set_sample_format(preset_data.get('sample_format'))
         self.entry_stain.setText(preset_data.get('stain', ''))
         self._set_objective(preset_data.get('objective'))
         self._apply_live_preset_data(preset_data)
@@ -4912,10 +4954,11 @@ class MultiPointWidgetGrid(QFrame):
             return
 
         self._stage_loaded_preset(preset_name, preset_data)
+        self.apply_loaded_preset()
 
     def apply_loaded_preset(self):
         if self.pending_preset_data is None:
-            QMessageBox.information(self, "Preset", "Load a preset first.")
+            QMessageBox.information(self, "Preset", "Choose a preset first.")
             return
 
         self.apply_preset_data(self.pending_preset_data)
@@ -4927,7 +4970,7 @@ class MultiPointWidgetGrid(QFrame):
             )
         else:
             self.label_preset_status.setText(f"Applied preset: {self.pending_preset_name}.")
-        self.btn_apply_preset.setEnabled(True)
+        self.btn_apply_preset.setEnabled(False)
 
     def delete_selected_preset(self):
         preset_name = self.dropdown_presets.currentText().strip()
