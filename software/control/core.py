@@ -4539,6 +4539,8 @@ class NavigationViewer(QFrame):
             self.mm_per_pixel = 0.1453
             self.origin_x_pixel = 200
             self.origin_y_pixel = 120
+            self.view.invertX(True)
+            self.view.invertY(True)
         elif sample == '4 glass slide':
             self.location_update_threshold_mm = 0.2
             self.mm_per_pixel = 0.084665
