@@ -62,6 +62,8 @@ class CollapsibleGroupBox(QGroupBox):
 
 
 class SmearScanPresetStore:
+    PRESET_SCHEMA_VERSION = 2
+
     def __init__(self, base_dir='cache/smear_scan_presets'):
         self.base_dir = base_dir
         os.makedirs(self.base_dir, exist_ok=True)
@@ -94,6 +96,7 @@ class SmearScanPresetStore:
     def save_preset(self, preset_name, preset_data, whiteBalanceController=None):
         payload = dict(preset_data)
         payload['preset_name'] = preset_name
+        payload['preset_schema_version'] = self.PRESET_SCHEMA_VERSION
 
         flatfield_path = self._flatfield_path(preset_name)
         if whiteBalanceController is not None:
@@ -4183,6 +4186,7 @@ class MultiPointWidgetGrid(QFrame):
         self.presetStore = SmearScanPresetStore()
         self.pending_preset_data = None
         self.pending_preset_name = None
+        self.pending_preset_missing_fields = []
         self.add_components()
         self.setFrameStyle(QFrame.Panel | QFrame.Raised)
         self.set_default_scan_size()
@@ -4601,15 +4605,44 @@ class MultiPointWidgetGrid(QFrame):
             return
         self.pending_preset_data = None
         self.pending_preset_name = None
+        self.pending_preset_missing_fields = []
         self.btn_apply_preset.setEnabled(False)
         self.label_preset_status.setText("Choose a preset, click Load Preset, then Apply Preset.")
+
+    def _get_missing_preset_fields(self, preset_data):
+        required_fields = [
+            ('live_configuration', 'live mode'),
+            ('live_exposure_time_ms', 'exposure'),
+            ('live_analog_gain', 'analog gain'),
+            ('live_illumination_intensity', 'illumination'),
+        ]
+        missing = [label for key, label in required_fields if key not in preset_data]
+
+        image_corrections = preset_data.get('image_corrections')
+        if not isinstance(image_corrections, dict):
+            missing.extend(['R/G/B white balance', 'gamma / saturation'])
+        else:
+            if 'gains' not in image_corrections:
+                missing.append('R/G/B white balance')
+            if 'gamma' not in image_corrections or 'saturation' not in image_corrections:
+                missing.append('gamma / saturation')
+
+        return missing
 
     def _stage_loaded_preset(self, preset_name, preset_data):
         self.pending_preset_name = preset_name
         self.pending_preset_data = preset_data
+        self.pending_preset_missing_fields = self._get_missing_preset_fields(preset_data)
         self.btn_apply_preset.setEnabled(True)
         self.entry_preset_name.setText(preset_name)
-        self.label_preset_status.setText(f"Preset loaded: {preset_name}. Click Apply Preset to update the workflow.")
+        if self.pending_preset_missing_fields:
+            missing_text = ", ".join(self.pending_preset_missing_fields)
+            self.label_preset_status.setText(
+                f"Preset loaded: {preset_name}. This is a legacy preset missing {missing_text}. "
+                "Apply it, then re-save once to capture the full workflow."
+            )
+        else:
+            self.label_preset_status.setText(f"Preset loaded: {preset_name}. Click Apply Preset to update the workflow.")
 
     def _set_selected_channels(self, channels):
         selected_channels = set(channels or [])
@@ -4767,7 +4800,14 @@ class MultiPointWidgetGrid(QFrame):
             return
 
         self.apply_preset_data(self.pending_preset_data)
-        self.label_preset_status.setText(f"Applied preset: {self.pending_preset_name}.")
+        if self.pending_preset_missing_fields:
+            missing_text = ", ".join(self.pending_preset_missing_fields)
+            self.label_preset_status.setText(
+                f"Applied preset: {self.pending_preset_name}. Missing legacy fields: {missing_text}. "
+                "Re-save this preset to store all current live and color settings."
+            )
+        else:
+            self.label_preset_status.setText(f"Applied preset: {self.pending_preset_name}.")
         self.btn_apply_preset.setEnabled(True)
 
     def delete_selected_preset(self):
