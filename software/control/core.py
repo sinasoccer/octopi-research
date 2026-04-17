@@ -39,6 +39,7 @@ from lxml import etree
 import json
 import math
 import random
+import traceback
 import numpy as np
 import pandas as pd
 import scipy.signal
@@ -2499,48 +2500,53 @@ class MultiPointWorker(QObject):
 
     def run(self):
         self.start_time = time.perf_counter_ns()
-        if not self.camera.is_streaming:
-            self.camera.start_streaming()
+        try:
+            if not self.camera.is_streaming:
+                self.camera.start_streaming()
 
-        while self.time_point < self.Nt:
-            # check if abort acquisition has been requested
-            if self.multiPointController.abort_acqusition_requested:
-                break
+            while self.time_point < self.Nt:
+                # check if abort acquisition has been requested
+                if self.multiPointController.abort_acqusition_requested:
+                    break
 
-            self.run_single_time_point()
+                self.run_single_time_point()
 
-            self.time_point = self.time_point + 1
-            if self.dt == 0: # continous acquisition
-                pass
-            else:  # timed acquisition
+                self.time_point = self.time_point + 1
+                if self.dt == 0: # continous acquisition
+                    pass
+                else:  # timed acquisition
 
-                # check if the aquisition has taken longer than dt or integer multiples of dt, if so skip the next time point(s)
-                while time.time() > self.timestamp_acquisition_started + self.time_point*self.dt:
-                    print('skip time point ' + str(self.time_point+1))
-                    self.time_point = self.time_point+1
+                    # check if the aquisition has taken longer than dt or integer multiples of dt, if so skip the next time point(s)
+                    while time.time() > self.timestamp_acquisition_started + self.time_point*self.dt:
+                        print('skip time point ' + str(self.time_point+1))
+                        self.time_point = self.time_point+1
 
-                # check if it has reached Nt
-                if self.time_point == self.Nt:
-                    break # no waiting after taking the last time point
+                    # check if it has reached Nt
+                    if self.time_point == self.Nt:
+                        break # no waiting after taking the last time point
 
-                # wait until it's time to do the next acquisition
-                while time.time() < self.timestamp_acquisition_started + self.time_point*self.dt:
-                    if self.multiPointController.abort_acqusition_requested:
-                        break
-                    time.sleep(0.05)
+                    # wait until it's time to do the next acquisition
+                    while time.time() < self.timestamp_acquisition_started + self.time_point*self.dt:
+                        if self.multiPointController.abort_acqusition_requested:
+                            break
+                        time.sleep(0.05)
+        except Exception as exc:
+            print(f"Multipoint worker crashed during acquisition: {exc!r}")
+            traceback.print_exc()
+        finally:
+            elapsed_time = time.perf_counter_ns() - self.start_time
+            print("Time taken for acquisition: " + str(elapsed_time/10**9))
 
-        elapsed_time = time.perf_counter_ns() - self.start_time
-        print("Time taken for acquisition: " + str(elapsed_time/10**9))
-
-        # End processing using the updated method
-        if DO_FLUORESCENCE_RTP:
-            self.processingHandler.processing_queue.join()
-            self.processingHandler.upload_queue.join()
-            self.processingHandler.end_processing()
-        # time.sleep(0.2)
-        # wait for signal_update_stats in process_fn_with_count_and_display
-        print("Time taken for acquisition/processing: ", (time.perf_counter_ns() - self.start_time) / 1e9)
-        self.finished.emit()
+            # End processing using the updated method
+            if DO_FLUORESCENCE_RTP:
+                self.processingHandler.processing_queue.join()
+                self.processingHandler.upload_queue.join()
+                self.processingHandler.end_processing()
+            self.navigationController.enable_joystick_button_action = True
+            # time.sleep(0.2)
+            # wait for signal_update_stats in process_fn_with_count_and_display
+            print("Time taken for acquisition/processing: ", (time.perf_counter_ns() - self.start_time) / 1e9)
+            self.finished.emit()
 
     def wait_till_operation_is_completed(self):
         while self.microcontroller.is_busy():
@@ -3267,8 +3273,37 @@ class MultiPointWorker(QObject):
             return image
         return self.whiteBalanceController.apply(image)
 
+    def get_abort_return_coordinate(self, region_id):
+        if isinstance(region_id, int):
+            if 0 <= region_id < len(self.scan_coordinates_mm):
+                return self.scan_coordinates_mm[region_id]
+            return None
+
+        if self.scan_coordinates_name is not None:
+            try:
+                name_index = self.scan_coordinates_name.index(region_id)
+            except ValueError:
+                name_index = None
+            if name_index is not None and 0 <= name_index < len(self.scan_coordinates_mm):
+                return self.scan_coordinates_mm[name_index]
+
+        if self.coordinate_dict is not None:
+            coordinates = self.coordinate_dict.get(region_id)
+            if coordinates:
+                return coordinates[0]
+
+        return None
+
     def handle_acquisition_abort(self, current_path, region_id=0):
-        self.move_to_coordinate(self.scan_coordinates_mm[region_id])
+        target_coordinate = self.get_abort_return_coordinate(region_id)
+        if target_coordinate is not None:
+            try:
+                self.move_to_coordinate(target_coordinate)
+            except Exception as exc:
+                print(f"Could not return to the scan position after abort: {exc!r}")
+                traceback.print_exc()
+        else:
+            print(f"Abort cleanup could not resolve a return coordinate for region {region_id!r}")
         self.coordinates_pd.to_csv(os.path.join(current_path,'coordinates.csv'),index=False,header=True)
         self.navigationController.enable_joystick_button_action = True
 
