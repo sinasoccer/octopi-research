@@ -474,6 +474,8 @@ class OctopiGUI(QMainWindow):
             liveControlWidget=self.liveControlWidget,
             wellplateFormatWidget=self.wellplateFormatWidget,
         )
+        if SHOW_TILED_PREVIEW and not USE_NAPARI_FOR_TILED_DISPLAY and hasattr(self, 'imageDisplayWindow_scan_preview'):
+            self.multipointController.image_to_display_tiled_preview.connect(self.imageDisplayWindow_scan_preview.display_image)
         self.sampleSettingsWidget = widgets.SampleSettingsWidget(self.objectivesWidget, self.wellplateFormatWidget)
 
         if self.slideScanWorkflowEnabled:
@@ -1188,6 +1190,8 @@ class OctopiGUI(QMainWindow):
         if self.slideScanWorkflowEnabled:
             if acquisition_started:
                 self.liveControlWidget.toggle_autolevel(False)
+                if isinstance(self.imageDisplayTabs, QTabWidget):
+                    self.imageDisplayTabs.setCurrentIndex(0)
             self.navigationViewer.on_acquisition_start(acquisition_started)
             self.multiPointWidgetGrid.display_progress_bar(acquisition_started)
             return

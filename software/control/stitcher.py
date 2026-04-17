@@ -150,7 +150,11 @@ class Stitcher(QThread, QObject):
 
         all_files = os.listdir(self.image_folder)
         sorted_input_files = sorted(
-            [filename for filename in all_files if filename.endswith((".bmp", ".tiff")) and 'focus_camera' not in filename]
+            [
+                filename for filename in all_files
+                if filename.lower().endswith((".bmp", ".png", ".jpg", ".jpeg", ".tiff"))
+                and 'focus_camera' not in filename
+            ]
         )
         if not sorted_input_files:
             raise Exception("No valid files found in directory.")
@@ -846,7 +850,13 @@ class CoordinateStitcher(QThread, QObject):
 
             print(f"Processing timepoint {time_point}, image folder: {image_folder}")
 
-            image_files = sorted([f for f in os.listdir(image_folder) if f.endswith(('.bmp', '.tiff')) and 'focus_camera' not in f])
+            image_files = sorted(
+                [
+                    f for f in os.listdir(image_folder)
+                    if f.lower().endswith(('.bmp', '.png', '.jpg', '.jpeg', '.tiff'))
+                    and 'focus_camera' not in f
+                ]
+            )
             
             if not image_files:
                 raise Exception(f"No valid files found in directory for timepoint {time_point}.")

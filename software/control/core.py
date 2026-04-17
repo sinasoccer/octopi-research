@@ -47,6 +47,33 @@ import cv2
 import imageio as iio
 
 
+def write_saved_image(saving_path, image):
+    extension = os.path.splitext(saving_path)[1].lower()
+
+    if extension in ('.tif', '.tiff'):
+        iio.imwrite(saving_path, image)
+        return
+
+    image_to_write = image
+    if image.ndim == 3 and image.shape[2] == 3:
+        image_to_write = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+    if extension in ('.jpg', '.jpeg'):
+        cv2.imwrite(
+            saving_path,
+            image_to_write,
+            [int(cv2.IMWRITE_JPEG_QUALITY), int(Acquisition.JPEG_QUALITY)],
+        )
+    elif extension == '.png':
+        cv2.imwrite(
+            saving_path,
+            image_to_write,
+            [int(cv2.IMWRITE_PNG_COMPRESSION), int(Acquisition.PNG_COMPRESSION)],
+        )
+    else:
+        cv2.imwrite(saving_path, image_to_write)
+
+
 class ObjectiveStore:
     def __init__(self, objectives_dict=OBJECTIVES, default_objective=DEFAULT_OBJECTIVE, parent=None):
         self.objectives_dict = objectives_dict
@@ -1104,10 +1131,9 @@ class ImageSaver(QObject):
                 if image.dtype == np.uint16:
                     # need to use tiff when saving 16 bit images
                     saving_path = os.path.join(self.base_path,self.experiment_ID,str(folder_ID),str(file_ID) + '_' + str(frame_ID) + '.tiff')
-                    iio.imwrite(saving_path,image)
                 else:
                     saving_path = os.path.join(self.base_path,self.experiment_ID,str(folder_ID),str(file_ID) + '_' + str(frame_ID) + '.' + self.image_format)
-                    cv2.imwrite(saving_path,image)
+                write_saved_image(saving_path, image)
 
                 self.counter = self.counter + 1
                 self.queue.task_done()
@@ -1153,7 +1179,7 @@ class ImageSaver(QObject):
 
 
 class ImageSaver_Tracking(QObject):
-    def __init__(self,base_path,image_format='bmp'):
+    def __init__(self,base_path,image_format=Acquisition.IMAGE_FORMAT):
         QObject.__init__(self)
         self.base_path = base_path
         self.image_format = image_format
@@ -1180,10 +1206,9 @@ class ImageSaver_Tracking(QObject):
                     os.mkdir(os.path.join(self.base_path,str(folder_ID)))
                 if image.dtype == np.uint16:
                     saving_path = os.path.join(self.base_path,str(folder_ID),str(file_ID) + '_' + str(frame_counter) + '_' + postfix + '.tiff')
-                    iio.imwrite(saving_path,image)
                 else:
                     saving_path = os.path.join(self.base_path,str(folder_ID),str(file_ID) + '_' + str(frame_counter) + '_' + postfix + '.' + self.image_format)
-                    cv2.imwrite(saving_path,image)
+                write_saved_image(saving_path, image)
                 self.queue.task_done()
                 self.image_lock.release()
             except:
@@ -3245,7 +3270,7 @@ class MultiPointWorker(QObject):
         if Acquisition.MERGE_CHANNELS:
             self._save_merged_image(image, file_ID, current_path)
 
-        iio.imwrite(saving_path,image)
+        write_saved_image(saving_path, image)
 
     def _save_merged_image(self, image, file_ID, current_path):
         self.image_count += 1
@@ -3260,7 +3285,7 @@ class MultiPointWorker(QObject):
                 else:
                     saving_path = os.path.join(current_path, file_ID + '_merged' + '.' + Acquisition.IMAGE_FORMAT)
 
-                iio.imwrite(saving_path, self.merged_image)
+                write_saved_image(saving_path, self.merged_image)
                 self.image_count = 0
         return
 
@@ -3337,9 +3362,9 @@ class MultiPointWorker(QObject):
             if len(rgb_image.shape) == 3:
                 print('writing RGB image')
                 if rgb_image.dtype == np.uint16:
-                    iio.imwrite(os.path.join(current_path, file_ID + '_BF_LED_matrix_full_RGB.tiff'), rgb_image)
+                    write_saved_image(os.path.join(current_path, file_ID + '_BF_LED_matrix_full_RGB.tiff'), rgb_image)
                 else:
-                    iio.imwrite(os.path.join(current_path, file_ID + '_BF_LED_matrix_full_RGB.' + Acquisition.IMAGE_FORMAT),rgb_image)
+                    write_saved_image(os.path.join(current_path, file_ID + '_BF_LED_matrix_full_RGB.' + Acquisition.IMAGE_FORMAT), rgb_image)
 
     def handle_rgb_channels(self, images, file_ID, current_path, config, i, j, k):
         for channel in ['BF LED matrix full_R', 'BF LED matrix full_G', 'BF LED matrix full_B']:
@@ -3361,7 +3386,7 @@ class MultiPointWorker(QObject):
             self.update_napari(image, channel, i, j, k)
 
             file_name = file_ID + '_' + channel.replace(' ', '_') + ('.tiff' if image.dtype == np.uint16 else '.' + Acquisition.IMAGE_FORMAT)
-            iio.imwrite(os.path.join(current_path, file_name), image)
+            write_saved_image(os.path.join(current_path, file_name), image)
 
     def construct_rgb_image(self, images, file_ID, current_path, config, i, j, k):
         rgb_image = np.zeros((*images['BF LED matrix full_R'].shape, 3), dtype=images['BF LED matrix full_R'].dtype)
@@ -3390,7 +3415,7 @@ class MultiPointWorker(QObject):
         # write the RGB image
         print('writing RGB image')
         file_name = file_ID + '_BF_LED_matrix_full_RGB' + ('.tiff' if rgb_image.dtype == np.uint16 else '.' + Acquisition.IMAGE_FORMAT)
-        iio.imwrite(os.path.join(current_path, file_name), rgb_image)
+        write_saved_image(os.path.join(current_path, file_name), rgb_image)
 
     def apply_white_balance_if_needed(self, image):
         if self.whiteBalanceController is None:

@@ -2856,6 +2856,7 @@ class SlideScanAcquisitionWidget(QFrame):
         self.scanWidget.checkbox_withAutofocus.setText("Refocus During Scan")
         self.scanWidget.checkbox_genFocusMap.setText("Use Focus Map")
         self.scanWidget.checkbox_hybridAutofocus.setText("Hybrid Focus Correction")
+        self.scanWidget.checkbox_stitchOutput.setText("Build One Big Image At End")
         self.scanWidget.entry_af_interval.setSuffix(" tiles")
         self.scanWidget.list_configurations.setMaximumHeight(96)
         self.scanWidget.list_configurations.setMinimumHeight(72)
@@ -5822,10 +5823,11 @@ class StitcherWidget(QFrame):
         self.rowLayout1.addStretch()
 
         # Output format dropdown
-        self.outputFormatLabel = QLabel('Output Format', self)
+        self.outputFormatLabel = QLabel('Big Image Format', self)
         self.outputFormatCombo = QComboBox(self)
-        self.outputFormatCombo.addItem("OME-ZARR")
         self.outputFormatCombo.addItem("OME-TIFF")
+        self.outputFormatCombo.addItem("OME-ZARR")
+        self.outputFormatCombo.setCurrentText("OME-TIFF")
         self.rowLayout1.addWidget(self.outputFormatLabel)
         self.rowLayout1.addWidget(self.outputFormatCombo)
 
@@ -5857,7 +5859,7 @@ class StitcherWidget(QFrame):
         self.setLayout(self.layout)
 
         # Button to view output in Napari
-        self.viewOutputButton = QPushButton("View Output in Napari")
+        self.viewOutputButton = QPushButton("Open Big Image")
         self.viewOutputButton.setEnabled(False)  # Initially disabled
         self.viewOutputButton.setVisible(False)
         self.viewOutputButton.clicked.connect(self.viewOutputNapari)
@@ -5867,7 +5869,7 @@ class StitcherWidget(QFrame):
         progress_row = QHBoxLayout()
 
         # Status label
-        self.statusLabel = QLabel("Status: Image Acquisition")
+        self.statusLabel = QLabel("Status: Building Big Image")
         progress_row.addWidget(self.statusLabel)
         self.statusLabel.setVisible(False)
 
@@ -5894,7 +5896,7 @@ class StitcherWidget(QFrame):
         self.registrationZCombo.setMaximum(Nz - 1)
 
     def gettingFlatfields(self):
-        self.statusLabel.setText('Status: Calculating Flatfields')
+        self.statusLabel.setText('Status: Preparing Big Image')
         self.viewOutputButton.setVisible(False)
         self.viewOutputButton.setStyleSheet("")
         self.progressBar.setValue(0)
@@ -5902,7 +5904,7 @@ class StitcherWidget(QFrame):
         self.progressBar.setVisible(True)
 
     def startingStitching(self):
-        self.statusLabel.setText('Status: Stitching Scans')
+        self.statusLabel.setText('Status: Building Big Image')
         self.viewOutputButton.setVisible(False)
         self.progressBar.setValue(0)
         self.statusLabel.setVisible(True)
@@ -5915,9 +5917,9 @@ class StitcherWidget(QFrame):
 
     def startingSaving(self, stitch_complete=False):
         if stitch_complete:
-            self.statusLabel.setText('Status: Saving Stitched Acquisition')
+            self.statusLabel.setText('Status: Saving Big Image')
         else:
-            self.statusLabel.setText('Status: Saving Stitched Region')
+            self.statusLabel.setText('Status: Saving Big Image Tiles')
         self.statusLabel.setVisible(True)
         self.progressBar.setRange(0, 0)  # indeterminate mode.
         self.progressBar.setVisible(True)
@@ -5931,6 +5933,7 @@ class StitcherWidget(QFrame):
         self.viewOutputButton.setVisible(True)
         self.viewOutputButton.setStyleSheet("background-color: #C2C2FF")
         self.viewOutputButton.setEnabled(True)
+        self.viewOutputButton.setText("Open Big Image")
         try:
             self.viewOutputButton.clicked.disconnect()
         except TypeError:
