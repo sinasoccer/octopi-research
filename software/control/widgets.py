@@ -1887,7 +1887,6 @@ class NavigationWidget(QFrame):
 
         self.btn_load_slide.clicked.connect(self.switch_position)
         self.btn_load_slide.setStyleSheet("background-color: #C2C2FF")
-        self.refresh_slide_position_button()
 
     def toggle_click_to_move(self, started):
         if started:
@@ -1991,7 +1990,8 @@ class NavigationWidget(QFrame):
 
     def slot_slide_loading_position_reached(self):
         self.slide_position = 'loading'
-        self.refresh_slide_position_button()
+        self.btn_load_slide.setStyleSheet("background-color: #C2FFC2")
+        self.btn_load_slide.setText('Move to Scanning Position')
         self.btn_moveX_forward.setEnabled(False)
         self.btn_moveX_backward.setEnabled(False)
         self.btn_moveY_forward.setEnabled(False)
@@ -2002,7 +2002,8 @@ class NavigationWidget(QFrame):
 
     def slot_slide_scanning_position_reached(self):
         self.slide_position = 'scanning'
-        self.refresh_slide_position_button()
+        self.btn_load_slide.setStyleSheet("background-color: #C2C2FF")
+        self.btn_load_slide.setText('Move to Loading Position')
         self.btn_moveX_forward.setEnabled(True)
         self.btn_moveX_backward.setEnabled(True)
         self.btn_moveY_forward.setEnabled(True)
@@ -2011,30 +2012,8 @@ class NavigationWidget(QFrame):
         self.btn_moveZ_backward.setEnabled(True)
         self.btn_load_slide.setEnabled(True)
 
-    def refresh_slide_position_button(self):
-        is_loading = False
-        if self.slidePositionController is not None:
-            is_loading = (
-                bool(self.slidePositionController.slide_loading_position_reached)
-                and not bool(self.slidePositionController.slide_scanning_position_reached)
-            )
-
-        if is_loading:
-            self.slide_position = 'loading'
-            self.btn_load_slide.setStyleSheet("background-color: #C2FFC2")
-            self.btn_load_slide.setText('Move to Scanning Position')
-        else:
-            self.slide_position = 'scanning'
-            self.btn_load_slide.setStyleSheet("background-color: #C2C2FF")
-            self.btn_load_slide.setText('Move To Loading Position')
-
     def switch_position(self):
-        is_loading = (
-            self.slidePositionController is not None
-            and bool(self.slidePositionController.slide_loading_position_reached)
-            and not bool(self.slidePositionController.slide_scanning_position_reached)
-        )
-        if not is_loading:
+        if self.slide_position != 'loading':
             self.slidePositionController.move_to_slide_loading_position()
         else:
             self.slidePositionController.move_to_slide_scanning_position()
@@ -2044,7 +2023,6 @@ class NavigationWidget(QFrame):
         self.slidePositionController = slidePositionController
         self.slidePositionController.signal_slide_loading_position_reached.connect(self.slot_slide_loading_position_reached)
         self.slidePositionController.signal_slide_scanning_position_reached.connect(self.slot_slide_scanning_position_reached)
-        self.refresh_slide_position_button()
 
 
 class NavigationBarWidget(QWidget):
@@ -2158,44 +2136,26 @@ class NavigationBarWidget(QWidget):
             self.navigationController.zero_z()
 
     def switch_position(self):
-        is_loading = (
-            self.slidePositionController is not None
-            and bool(self.slidePositionController.slide_loading_position_reached)
-            and not bool(self.slidePositionController.slide_scanning_position_reached)
-        )
-        if not is_loading:
+        if self.btn_load_slide.text() == 'Move To Loading Position':
             self.slidePositionController.move_to_slide_loading_position()
         else:
             self.slidePositionController.move_to_slide_scanning_position()
         self.btn_load_slide.setEnabled(False)
 
     def slot_slide_loading_position_reached(self):
-        self.refresh_slide_position_button()
+        self.btn_load_slide.setText('Move to Scanning Position')
+        self.btn_load_slide.setStyleSheet("background-color: #C2FFC2")
+        self.btn_load_slide.setEnabled(True)
 
     def slot_slide_scanning_position_reached(self):
-        self.refresh_slide_position_button()
-
-    def refresh_slide_position_button(self):
-        is_loading = False
-        if self.slidePositionController is not None:
-            is_loading = (
-                bool(self.slidePositionController.slide_loading_position_reached)
-                and not bool(self.slidePositionController.slide_scanning_position_reached)
-            )
-
-        if is_loading:
-            self.btn_load_slide.setText('Move to Scanning Position')
-            self.btn_load_slide.setStyleSheet("background-color: #C2FFC2")
-        else:
-            self.btn_load_slide.setText('Move To Loading Position')
-            self.btn_load_slide.setStyleSheet("background-color: #C2C2FF")
+        self.btn_load_slide.setText('Move To Loading Position')
+        self.btn_load_slide.setStyleSheet("background-color: #C2C2FF")
         self.btn_load_slide.setEnabled(True)
 
     def replace_slide_controller(self, slidePositionController):
         self.slidePositionController = slidePositionController
         self.slidePositionController.signal_slide_loading_position_reached.connect(self.slot_slide_loading_position_reached)
         self.slidePositionController.signal_slide_scanning_position_reached.connect(self.slot_slide_scanning_position_reached)
-        self.refresh_slide_position_button()
 
     def connect_signals(self):
         if self.navigationController is not None:
@@ -2203,7 +2163,6 @@ class NavigationBarWidget(QWidget):
         if self.slidePositionController is not None:
             self.slidePositionController.signal_slide_loading_position_reached.connect(self.slot_slide_loading_position_reached)
             self.slidePositionController.signal_slide_scanning_position_reached.connect(self.slot_slide_scanning_position_reached)
-            self.refresh_slide_position_button()
 
 
 class DACControWidget(QFrame):
