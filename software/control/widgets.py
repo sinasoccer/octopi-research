@@ -2263,6 +2263,7 @@ class SlideScanQuickActionsWidget(QFrame):
         super().__init__(*args, **kwargs)
         self.whiteBalanceWidget = whiteBalanceWidget
         self.autofocusController = autofocusController
+        self.colorTuningWidget = None
         self.add_components()
         self.setFrameStyle(QFrame.Panel | QFrame.Raised)
 
@@ -2329,6 +2330,9 @@ class SlideScanQuickActionsWidget(QFrame):
             self.btn_background_roi.blockSignals(False)
             self.btn_background_roi.setText("Show Background ROI")
 
+        if self.colorTuningWidget is not None:
+            self.colorTuningWidget.refresh_state()
+
     def auto_white_balance(self):
         if self.whiteBalanceWidget is None:
             return
@@ -2359,6 +2363,104 @@ class SlideScanQuickActionsWidget(QFrame):
         if self.autofocusController is None:
             return
         self.autofocusController.autofocus(False)
+
+
+class SlideScanColorTuningWidget(QFrame):
+    def __init__(self, whiteBalanceWidget=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.whiteBalanceWidget = whiteBalanceWidget
+        self.whiteBalanceController = getattr(whiteBalanceWidget, "whiteBalanceController", None)
+        self.add_components()
+        self.setFrameStyle(QFrame.Panel | QFrame.Raised)
+
+    def _build_gain_spinbox(self):
+        spinbox = QDoubleSpinBox()
+        spinbox.setRange(0.25, 4.0)
+        spinbox.setSingleStep(0.05)
+        spinbox.setDecimals(3)
+        return spinbox
+
+    def add_components(self):
+        self.label_hint = QLabel(
+            "Use these gains to push the smear away from magenta: raise G, lower B first, then trim R."
+        )
+        self.label_hint.setWordWrap(True)
+        self.label_hint.setStyleSheet("color: #58606B;")
+
+        self.checkbox_enable = QCheckBox("Enable Software White Balance")
+        self.checkbox_enable.toggled.connect(self.toggle_enabled)
+
+        self.entry_gain_r = self._build_gain_spinbox()
+        self.entry_gain_g = self._build_gain_spinbox()
+        self.entry_gain_b = self._build_gain_spinbox()
+        self.entry_gain_r.valueChanged.connect(lambda value: self.set_manual_gain("r", value))
+        self.entry_gain_g.valueChanged.connect(lambda value: self.set_manual_gain("g", value))
+        self.entry_gain_b.valueChanged.connect(lambda value: self.set_manual_gain("b", value))
+
+        self.btn_match_smear = QPushButton("Start From Smear Match")
+        self.btn_match_smear.clicked.connect(self.apply_smear_match)
+
+        gains_row = QHBoxLayout()
+        gains_row.addWidget(QLabel("R"))
+        gains_row.addWidget(self.entry_gain_r)
+        gains_row.addWidget(QLabel("G"))
+        gains_row.addWidget(self.entry_gain_g)
+        gains_row.addWidget(QLabel("B"))
+        gains_row.addWidget(self.entry_gain_b)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.label_hint)
+        layout.addWidget(self.checkbox_enable)
+        layout.addLayout(gains_row)
+        layout.addWidget(self.btn_match_smear)
+        self.setLayout(layout)
+        self.refresh_state()
+
+    def refresh_state(self):
+        has_wb = self.whiteBalanceController is not None
+        enabled = has_wb and self.whiteBalanceController.is_enabled()
+        gains = self.whiteBalanceController.get_gains() if has_wb else (1.0, 1.0, 1.0)
+
+        self.checkbox_enable.blockSignals(True)
+        self.checkbox_enable.setChecked(enabled)
+        self.checkbox_enable.blockSignals(False)
+        self.checkbox_enable.setEnabled(has_wb)
+
+        for widget, value in (
+            (self.entry_gain_r, gains[0]),
+            (self.entry_gain_g, gains[1]),
+            (self.entry_gain_b, gains[2]),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+            widget.setEnabled(has_wb)
+
+        self.btn_match_smear.setEnabled(has_wb)
+
+    def toggle_enabled(self, checked):
+        if self.whiteBalanceController is None:
+            return
+        self.whiteBalanceController.set_enabled(checked)
+
+    def set_manual_gain(self, channel, value):
+        if self.whiteBalanceController is None:
+            return
+        self.whiteBalanceController.set_gains(**{channel: value})
+        self.whiteBalanceController.set_enabled(True)
+
+        if not self.checkbox_enable.isChecked():
+            self.checkbox_enable.blockSignals(True)
+            self.checkbox_enable.setChecked(True)
+            self.checkbox_enable.blockSignals(False)
+
+    def apply_smear_match(self):
+        if self.whiteBalanceController is None:
+            return
+
+        self.whiteBalanceController.set_gains(r=0.90, g=1.15, b=0.75)
+        self.whiteBalanceController.set_enabled(True)
+        self.refresh_state()
 
 
 class SlideScanAcquisitionWidget(QFrame):

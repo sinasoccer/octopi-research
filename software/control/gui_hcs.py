@@ -479,6 +479,10 @@ class OctopiGUI(QMainWindow):
                 getattr(self.cameraSettingWidget, 'softwareWhiteBalanceWidget', None),
                 self.autofocusController,
             )
+            self.slideScanColorTuningWidget = widgets.SlideScanColorTuningWidget(
+                getattr(self.cameraSettingWidget, 'softwareWhiteBalanceWidget', None),
+            )
+            self.slideScanQuickActionsWidget.colorTuningWidget = self.slideScanColorTuningWidget
             self.slideScanAcquisitionWidget = widgets.SlideScanAcquisitionWidget(
                 self.sampleSettingsWidget,
                 self.multiPointWidgetGrid,
@@ -620,6 +624,11 @@ class OctopiGUI(QMainWindow):
             actions_layout.addWidget(self.slideScanQuickActionsWidget)
             actions_group.setLayout(actions_layout)
 
+            color_group = QGroupBox("Color Tuning")
+            color_layout = QVBoxLayout()
+            color_layout.addWidget(self.slideScanColorTuningWidget)
+            color_group.setLayout(color_layout)
+
             stage_group = QGroupBox("Stage Position")
             stage_layout = QVBoxLayout()
             stage_layout.addWidget(self.navigationWidget)
@@ -637,6 +646,7 @@ class OctopiGUI(QMainWindow):
             layout.addWidget(subtitle)
             layout.addWidget(quick_group)
             layout.addWidget(actions_group)
+            layout.addWidget(color_group)
             layout.addWidget(stage_group)
             layout.addWidget(self.slideScanAcquisitionWidget)
             layout.addWidget(advanced_camera_group)
