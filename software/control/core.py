@@ -99,11 +99,15 @@ class WhiteBalanceController:
         self._enabled = enabled
         self._flatfield_enabled = flatfield_enabled
         self._gains = np.array(gains, dtype=np.float32)
+        self._gamma = 1.0
+        self._saturation = 1.0
         self._reference_image = None
         self._latest_image = None
         self._latest_full_image = None
         self._latest_rgb_image = None
         self._flatfield_reference = None
+        self._match_reference_image = None
+        self._match_reference_path = None
         self._lock = Lock()
         self._settings_path = settings_path
         self._flatfield_path = flatfield_path
@@ -146,6 +150,26 @@ class WhiteBalanceController:
         with self._lock:
             return self._flatfield_reference is not None
 
+    def has_match_reference_image(self):
+        with self._lock:
+            return self._match_reference_image is not None
+
+    def get_match_reference_path(self):
+        with self._lock:
+            return self._match_reference_path
+
+    def get_match_reference_name(self):
+        with self._lock:
+            if self._match_reference_path is None:
+                return None
+            return os.path.basename(self._match_reference_path)
+
+    def get_match_reference_image(self):
+        with self._lock:
+            if self._match_reference_image is None:
+                return None
+            return self._match_reference_image.copy()
+
     def _load_state(self):
         if not self._settings_path or not os.path.exists(self._settings_path):
             return
@@ -159,6 +183,8 @@ class WhiteBalanceController:
         gains = state.get('gains')
         enabled = state.get('enabled')
         flatfield_enabled = state.get('flatfield_enabled')
+        gamma = state.get('gamma')
+        saturation = state.get('saturation')
 
         if isinstance(gains, list) and len(gains) == 3:
             self._gains = np.array(gains, dtype=np.float32)
@@ -166,6 +192,10 @@ class WhiteBalanceController:
             self._enabled = bool(enabled)
         if flatfield_enabled is not None:
             self._flatfield_enabled = bool(flatfield_enabled)
+        if gamma is not None:
+            self._gamma = float(np.clip(gamma, 0.4, 2.5))
+        if saturation is not None:
+            self._saturation = float(np.clip(saturation, 0.25, 2.5))
 
     def _save_state(self):
         if not self._settings_path:
@@ -180,6 +210,8 @@ class WhiteBalanceController:
                 'enabled': self._enabled,
                 'gains': [float(value) for value in self._gains],
                 'flatfield_enabled': self._flatfield_enabled,
+                'gamma': float(self._gamma),
+                'saturation': float(self._saturation),
             }
 
         try:
@@ -239,6 +271,14 @@ class WhiteBalanceController:
         with self._lock:
             return tuple(float(value) for value in self._gains)
 
+    def get_gamma(self):
+        with self._lock:
+            return float(self._gamma)
+
+    def get_saturation(self):
+        with self._lock:
+            return float(self._saturation)
+
     def set_gains(self, r=None, g=None, b=None):
         with self._lock:
             if r is not None:
@@ -249,9 +289,21 @@ class WhiteBalanceController:
                 self._gains[2] = max(0.01, float(b))
         self._save_state()
 
+    def set_gamma(self, gamma):
+        with self._lock:
+            self._gamma = float(np.clip(gamma, 0.4, 2.5))
+        self._save_state()
+
+    def set_saturation(self, saturation):
+        with self._lock:
+            self._saturation = float(np.clip(saturation, 0.25, 2.5))
+        self._save_state()
+
     def reset(self):
         with self._lock:
             self._gains[:] = 1.0
+            self._gamma = 1.0
+            self._saturation = 1.0
             self._enabled = False
         self._save_state()
 
@@ -306,6 +358,8 @@ class WhiteBalanceController:
             profile = {
                 'enabled': bool(self._enabled),
                 'gains': [float(value) for value in self._gains],
+                'gamma': float(self._gamma),
+                'saturation': float(self._saturation),
                 'flatfield_enabled': bool(self._flatfield_enabled and self._flatfield_reference is not None),
                 'has_flatfield': self._flatfield_reference is not None,
             }
@@ -328,12 +382,16 @@ class WhiteBalanceController:
 
         gains = profile.get('gains', [1.0, 1.0, 1.0])
         enabled = bool(profile.get('enabled', False))
+        gamma = float(profile.get('gamma', 1.0))
+        saturation = float(profile.get('saturation', 1.0))
         flatfield_enabled = bool(profile.get('flatfield_enabled', False))
         has_flatfield = bool(profile.get('has_flatfield', False))
 
         if isinstance(gains, list) and len(gains) == 3:
             with self._lock:
                 self._gains = np.array(gains, dtype=np.float32)
+                self._gamma = float(np.clip(gamma, 0.4, 2.5))
+                self._saturation = float(np.clip(saturation, 0.25, 2.5))
                 self._enabled = enabled
             self._save_state()
 
@@ -342,6 +400,175 @@ class WhiteBalanceController:
             self.set_flatfield_enabled(flatfield_enabled)
         else:
             self.clear_flatfield()
+
+    def _normalize_loaded_reference_image(self, image, max_dimension=512):
+        if image is None:
+            return None
+
+        image_array = np.asarray(image)
+        if image_array.ndim == 2:
+            image_array = np.stack([image_array] * 3, axis=2)
+        elif image_array.ndim == 3 and image_array.shape[2] >= 4:
+            rgb = image_array[:, :, :3].astype(np.float32, copy=False)
+            alpha = image_array[:, :, 3:4].astype(np.float32, copy=False)
+            alpha_scale = 255.0 if np.nanmax(alpha) > 1.0 else 1.0
+            alpha = np.clip(alpha / alpha_scale, 0.0, 1.0)
+            image_array = rgb * alpha + 255.0 * (1.0 - alpha)
+        elif image_array.ndim != 3 or image_array.shape[2] < 3:
+            return None
+
+        image_array = image_array[:, :, :3]
+        image_array = image_array.astype(np.float32, copy=False)
+        finite_values = image_array[np.isfinite(image_array)]
+        if finite_values.size == 0:
+            return None
+
+        max_value = float(np.nanmax(finite_values))
+        min_value = float(np.nanmin(finite_values))
+        if max_value <= 1.5:
+            image_array *= 255.0
+        elif max_value > 255.0 or min_value < 0.0:
+            image_array = cv2.normalize(image_array, None, 0, 255, cv2.NORM_MINMAX)
+
+        image_array = np.clip(image_array, 0, 255)
+
+        height, width = image_array.shape[:2]
+        longest_edge = max(height, width)
+        if longest_edge > max_dimension:
+            scale = max_dimension / float(longest_edge)
+            image_array = cv2.resize(
+                image_array,
+                (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        return image_array.astype(np.float32, copy=False)
+
+    def load_match_reference_image(self, file_path):
+        if not file_path:
+            return False
+
+        try:
+            image = iio.imread(file_path)
+        except Exception:
+            return False
+
+        normalized_image = self._normalize_loaded_reference_image(image)
+        if normalized_image is None or not self._is_rgb_image(normalized_image):
+            return False
+
+        with self._lock:
+            self._match_reference_image = normalized_image
+            self._match_reference_path = file_path
+        return True
+
+    def clear_match_reference_image(self):
+        with self._lock:
+            self._match_reference_image = None
+            self._match_reference_path = None
+
+    def _build_reference_masks(self, image):
+        image_uint8 = np.clip(image, 0, 255).astype(np.uint8, copy=False)
+        hsv = cv2.cvtColor(image_uint8, cv2.COLOR_RGB2HSV)
+        value = hsv[:, :, 2].astype(np.float32)
+        saturation = hsv[:, :, 1].astype(np.float32)
+        chroma = image_uint8.max(axis=2).astype(np.float32) - image_uint8.min(axis=2).astype(np.float32)
+
+        tissue_mask = (
+            (value >= np.percentile(value, 5))
+            & (value <= np.percentile(value, 97))
+            & (chroma >= max(8.0, np.percentile(chroma, 55)))
+        )
+        if np.count_nonzero(tissue_mask) < 128:
+            tissue_mask = (value <= np.percentile(value, 92)) & (chroma >= np.percentile(chroma, 45))
+        if np.count_nonzero(tissue_mask) < 128:
+            tissue_mask = value <= np.percentile(value, 90)
+
+        background_mask = (
+            (value >= np.percentile(value, 92))
+            & (saturation <= max(12.0, np.percentile(saturation, 45)))
+        )
+        if np.count_nonzero(background_mask) < 128:
+            background_mask = value >= np.percentile(value, 96)
+
+        return tissue_mask, background_mask, value, saturation
+
+    def _estimate_reference_match(self, current_image, reference_image):
+        current_rgb = self._normalize_loaded_reference_image(current_image)
+        reference_rgb = self._normalize_loaded_reference_image(reference_image)
+        if current_rgb is None or reference_rgb is None:
+            return None
+
+        current_tissue_mask, current_background_mask, current_value, current_saturation = self._build_reference_masks(current_rgb)
+        reference_tissue_mask, reference_background_mask, reference_value, reference_saturation = self._build_reference_masks(reference_rgb)
+
+        current_tissue = current_rgb[current_tissue_mask]
+        reference_tissue = reference_rgb[reference_tissue_mask]
+        if current_tissue.size == 0 or reference_tissue.size == 0:
+            return None
+
+        current_channel_means = np.maximum(current_tissue.mean(axis=0), 1e-6)
+        reference_channel_means = np.maximum(reference_tissue.mean(axis=0), 1e-6)
+        gains = reference_channel_means / current_channel_means
+        gains /= max(gains[1], 1e-6)
+        gains = np.clip(gains, 0.25, 4.0).astype(np.float32)
+
+        current_background_level = float(
+            np.median(current_value[current_background_mask]) if np.count_nonzero(current_background_mask) else np.percentile(current_value, 95)
+        )
+        reference_background_level = float(
+            np.median(reference_value[reference_background_mask]) if np.count_nonzero(reference_background_mask) else np.percentile(reference_value, 95)
+        )
+        brightness_ratio = float(np.clip(reference_background_level / max(current_background_level, 1e-6), 0.4, 2.5))
+
+        current_tissue_level = np.clip(current_value[current_tissue_mask] / max(current_background_level, 1e-6), 0.05, 0.95)
+        reference_tissue_level = np.clip(reference_value[reference_tissue_mask] / max(reference_background_level, 1e-6), 0.05, 0.95)
+        current_mid = float(np.clip(np.median(current_tissue_level), 0.05, 0.95))
+        reference_mid = float(np.clip(np.median(reference_tissue_level), 0.05, 0.95))
+        current_mid_log = float(np.log(current_mid))
+        if abs(current_mid_log) < 1e-6:
+            gamma = 1.0
+        else:
+            gamma = float(np.clip(np.log(reference_mid) / current_mid_log, 0.5, 1.8))
+
+        current_sat = float(np.clip(np.median(current_saturation[current_tissue_mask]), 1.0, 255.0))
+        reference_sat = float(np.clip(np.median(reference_saturation[reference_tissue_mask]), 1.0, 255.0))
+        saturation = float(np.clip(reference_sat / current_sat, 0.4, 1.6))
+
+        chroma_error = float(np.mean(np.abs(
+            (reference_channel_means / np.sum(reference_channel_means))
+            - (current_channel_means / np.sum(current_channel_means))
+        )))
+
+        return {
+            'gains': tuple(float(value) for value in gains),
+            'gamma': gamma,
+            'saturation': saturation,
+            'brightness_ratio': brightness_ratio,
+            'chroma_error': chroma_error,
+        }
+
+    def auto_match_to_reference_image(self):
+        with self._lock:
+            current_image = None if self._latest_rgb_image is None else self._latest_rgb_image.copy()
+            reference_image = None if self._match_reference_image is None else self._match_reference_image.copy()
+
+        if current_image is None or reference_image is None:
+            return None
+
+        corrected_current = self._apply_flatfield_correction(current_image, return_dtype=np.float32)
+        match = self._estimate_reference_match(corrected_current, reference_image)
+        if match is None:
+            return None
+
+        with self._lock:
+            self._gains[:] = np.array(match['gains'], dtype=np.float32)
+            self._gamma = float(match['gamma'])
+            self._saturation = float(match['saturation'])
+            self._enabled = True
+
+        self._save_state()
+        return match
 
     def update_reference_image(self, image, full_image=None):
         if image is None:
@@ -583,8 +810,22 @@ class WhiteBalanceController:
             if not self._enabled:
                 return corrected
             gains = self._gains.copy()
+            gamma = float(self._gamma)
+            saturation = float(self._saturation)
 
         balanced = corrected.astype(np.float32, copy=False) * gains.reshape((1, 1, 3))
+
+        if not np.isclose(saturation, 1.0):
+            grayscale = np.tensordot(balanced, np.array([0.299, 0.587, 0.114], dtype=np.float32), axes=([2], [0]))
+            balanced = grayscale[:, :, None] + (balanced - grayscale[:, :, None]) * saturation
+
+        if not np.isclose(gamma, 1.0):
+            if np.issubdtype(corrected.dtype, np.integer):
+                max_value = float(np.iinfo(corrected.dtype).max)
+            else:
+                max_value = float(max(np.nanpercentile(balanced, 99.9), 1.0))
+            normalized = np.clip(balanced / max(max_value, 1e-6), 0.0, 1.0)
+            balanced = np.power(normalized, gamma).astype(np.float32, copy=False) * max_value
 
         if np.issubdtype(corrected.dtype, np.integer):
             info = np.iinfo(corrected.dtype)

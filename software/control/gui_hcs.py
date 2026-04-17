@@ -482,6 +482,11 @@ class OctopiGUI(QMainWindow):
             self.slideScanColorTuningWidget = widgets.SlideScanColorTuningWidget(
                 getattr(self.cameraSettingWidget, 'softwareWhiteBalanceWidget', None),
             )
+            self.slideScanReferenceMatchWidget = widgets.SlideScanReferenceMatchWidget(
+                getattr(self.cameraSettingWidget, 'softwareWhiteBalanceWidget', None),
+                self.liveControlWidget,
+                self.slideScanColorTuningWidget,
+            )
             self.slideScanQuickActionsWidget.colorTuningWidget = self.slideScanColorTuningWidget
             self.slideScanAcquisitionWidget = widgets.SlideScanAcquisitionWidget(
                 self.sampleSettingsWidget,
@@ -624,6 +629,11 @@ class OctopiGUI(QMainWindow):
             actions_layout.addWidget(self.slideScanQuickActionsWidget)
             actions_group.setLayout(actions_layout)
 
+            reference_group = QGroupBox("Reference Match")
+            reference_layout = QVBoxLayout()
+            reference_layout.addWidget(self.slideScanReferenceMatchWidget)
+            reference_group.setLayout(reference_layout)
+
             color_group = QGroupBox("Color Tuning")
             color_layout = QVBoxLayout()
             color_layout.addWidget(self.slideScanColorTuningWidget)
@@ -646,6 +656,7 @@ class OctopiGUI(QMainWindow):
             layout.addWidget(subtitle)
             layout.addWidget(quick_group)
             layout.addWidget(actions_group)
+            layout.addWidget(reference_group)
             layout.addWidget(color_group)
             layout.addWidget(stage_group)
             layout.addWidget(self.slideScanAcquisitionWidget)

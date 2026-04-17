@@ -2382,7 +2382,7 @@ class SlideScanColorTuningWidget(QFrame):
 
     def add_components(self):
         self.label_hint = QLabel(
-            "Use these gains to push the smear away from magenta: raise G, lower B first, then trim R."
+            "Fine-tune the live image after auto-match. Raise G and lower B to fight magenta, use saturation to calm neon purple, and gamma to open midtone detail."
         )
         self.label_hint.setWordWrap(True)
         self.label_hint.setStyleSheet("color: #58606B;")
@@ -2397,6 +2397,18 @@ class SlideScanColorTuningWidget(QFrame):
         self.entry_gain_g.valueChanged.connect(lambda value: self.set_manual_gain("g", value))
         self.entry_gain_b.valueChanged.connect(lambda value: self.set_manual_gain("b", value))
 
+        self.entry_gamma = QDoubleSpinBox()
+        self.entry_gamma.setRange(0.4, 2.0)
+        self.entry_gamma.setSingleStep(0.05)
+        self.entry_gamma.setDecimals(2)
+        self.entry_gamma.valueChanged.connect(self.set_manual_gamma)
+
+        self.entry_saturation = QDoubleSpinBox()
+        self.entry_saturation.setRange(0.4, 1.8)
+        self.entry_saturation.setSingleStep(0.05)
+        self.entry_saturation.setDecimals(2)
+        self.entry_saturation.valueChanged.connect(self.set_manual_saturation)
+
         self.btn_match_smear = QPushButton("Start From Smear Match")
         self.btn_match_smear.clicked.connect(self.apply_smear_match)
 
@@ -2408,18 +2420,32 @@ class SlideScanColorTuningWidget(QFrame):
         gains_row.addWidget(QLabel("B"))
         gains_row.addWidget(self.entry_gain_b)
 
+        tone_row = QHBoxLayout()
+        tone_row.addWidget(QLabel("Gamma"))
+        tone_row.addWidget(self.entry_gamma)
+        tone_row.addWidget(QLabel("Saturation"))
+        tone_row.addWidget(self.entry_saturation)
+        tone_row.addStretch(1)
+
         layout = QVBoxLayout()
         layout.addWidget(self.label_hint)
         layout.addWidget(self.checkbox_enable)
         layout.addLayout(gains_row)
+        layout.addLayout(tone_row)
         layout.addWidget(self.btn_match_smear)
         self.setLayout(layout)
         self.refresh_state()
+
+    def _sync_embedded_white_balance_widget(self):
+        if self.whiteBalanceWidget is not None:
+            self.whiteBalanceWidget.refresh_from_controller()
 
     def refresh_state(self):
         has_wb = self.whiteBalanceController is not None
         enabled = has_wb and self.whiteBalanceController.is_enabled()
         gains = self.whiteBalanceController.get_gains() if has_wb else (1.0, 1.0, 1.0)
+        gamma = self.whiteBalanceController.get_gamma() if has_wb else 1.0
+        saturation = self.whiteBalanceController.get_saturation() if has_wb else 1.0
 
         self.checkbox_enable.blockSignals(True)
         self.checkbox_enable.setChecked(enabled)
@@ -2436,19 +2462,52 @@ class SlideScanColorTuningWidget(QFrame):
             widget.blockSignals(False)
             widget.setEnabled(has_wb)
 
+        for widget, value in (
+            (self.entry_gamma, gamma),
+            (self.entry_saturation, saturation),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+            widget.setEnabled(has_wb)
+
         self.btn_match_smear.setEnabled(has_wb)
 
     def toggle_enabled(self, checked):
         if self.whiteBalanceController is None:
             return
         self.whiteBalanceController.set_enabled(checked)
+        self._sync_embedded_white_balance_widget()
 
     def set_manual_gain(self, channel, value):
         if self.whiteBalanceController is None:
             return
         self.whiteBalanceController.set_gains(**{channel: value})
         self.whiteBalanceController.set_enabled(True)
+        self._sync_embedded_white_balance_widget()
 
+        if not self.checkbox_enable.isChecked():
+            self.checkbox_enable.blockSignals(True)
+            self.checkbox_enable.setChecked(True)
+            self.checkbox_enable.blockSignals(False)
+
+    def set_manual_gamma(self, value):
+        if self.whiteBalanceController is None:
+            return
+        self.whiteBalanceController.set_gamma(value)
+        self.whiteBalanceController.set_enabled(True)
+        self._sync_embedded_white_balance_widget()
+        if not self.checkbox_enable.isChecked():
+            self.checkbox_enable.blockSignals(True)
+            self.checkbox_enable.setChecked(True)
+            self.checkbox_enable.blockSignals(False)
+
+    def set_manual_saturation(self, value):
+        if self.whiteBalanceController is None:
+            return
+        self.whiteBalanceController.set_saturation(value)
+        self.whiteBalanceController.set_enabled(True)
+        self._sync_embedded_white_balance_widget()
         if not self.checkbox_enable.isChecked():
             self.checkbox_enable.blockSignals(True)
             self.checkbox_enable.setChecked(True)
@@ -2459,7 +2518,213 @@ class SlideScanColorTuningWidget(QFrame):
             return
 
         self.whiteBalanceController.set_gains(r=0.90, g=1.15, b=0.75)
+        self.whiteBalanceController.set_gamma(1.00)
+        self.whiteBalanceController.set_saturation(0.88)
         self.whiteBalanceController.set_enabled(True)
+        self._sync_embedded_white_balance_widget()
+        self.refresh_state()
+
+
+class SlideScanReferenceMatchWidget(QFrame):
+    def __init__(self, whiteBalanceWidget=None, liveControlWidget=None, colorTuningWidget=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.whiteBalanceWidget = whiteBalanceWidget
+        self.whiteBalanceController = getattr(whiteBalanceWidget, "whiteBalanceController", None)
+        self.liveControlWidget = liveControlWidget
+        self.colorTuningWidget = colorTuningWidget
+        self.add_components()
+        self.setFrameStyle(QFrame.Panel | QFrame.Raised)
+
+    def add_components(self):
+        self.label_hint = QLabel(
+            "Load a good smear image, then auto-match the current live field to that reference. The matcher uses the current frame plus the saved reference to set RGB balance, tone, saturation, and brightness."
+        )
+        self.label_hint.setWordWrap(True)
+        self.label_hint.setStyleSheet("color: #58606B;")
+
+        self.reference_preview = QLabel("No reference image loaded")
+        self.reference_preview.setAlignment(Qt.AlignCenter)
+        self.reference_preview.setFixedSize(156, 156)
+        self.reference_preview.setStyleSheet("border: 1px solid #CCD1D8; background: #F7F8FA; color: #58606B;")
+
+        self.label_reference_name = QLabel("Reference: none")
+        self.label_reference_name.setWordWrap(True)
+
+        self.checkbox_adjust_hardware = QCheckBox("Also match brightness with illumination / exposure")
+        self.checkbox_adjust_hardware.setChecked(True)
+
+        self.btn_load_reference = QPushButton("Load Reference Image")
+        self.btn_load_reference.clicked.connect(self.load_reference_image)
+
+        self.btn_clear_reference = QPushButton("Clear")
+        self.btn_clear_reference.clicked.connect(self.clear_reference_image)
+
+        self.btn_match_reference = QPushButton("Match Current Frame To Reference")
+        self.btn_match_reference.clicked.connect(self.match_current_frame_to_reference)
+
+        self.label_status = QLabel("Reference matching is ready once a smear image is loaded and live view is running.")
+        self.label_status.setWordWrap(True)
+        self.label_status.setStyleSheet("color: #58606B;")
+
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(self.reference_preview, 0, Qt.AlignTop)
+
+        preview_details = QVBoxLayout()
+        preview_details.addWidget(self.label_reference_name)
+        preview_details.addWidget(self.checkbox_adjust_hardware)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.btn_load_reference)
+        button_row.addWidget(self.btn_clear_reference)
+        preview_details.addLayout(button_row)
+        preview_details.addWidget(self.btn_match_reference)
+        preview_details.addStretch(1)
+
+        preview_row.addLayout(preview_details, 1)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.label_hint)
+        layout.addLayout(preview_row)
+        layout.addWidget(self.label_status)
+        self.setLayout(layout)
+        self.refresh_state()
+
+    def _set_preview_image(self, image):
+        if image is None:
+            self.reference_preview.setPixmap(QPixmap())
+            self.reference_preview.setText("No reference image loaded")
+            return
+
+        preview = np.ascontiguousarray(np.clip(image, 0, 255).astype(np.uint8))
+        qimage = QImage(preview.data, preview.shape[1], preview.shape[0], preview.strides[0], QImage.Format_RGB888).copy()
+        pixmap = QPixmap.fromImage(qimage).scaled(
+            self.reference_preview.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.reference_preview.setText("")
+        self.reference_preview.setPixmap(pixmap)
+
+    def _sync_dependents(self):
+        if self.whiteBalanceWidget is not None:
+            self.whiteBalanceWidget.refresh_from_controller()
+        if self.colorTuningWidget is not None:
+            self.colorTuningWidget.refresh_state()
+
+    def refresh_state(self):
+        has_wb = self.whiteBalanceController is not None
+        has_reference = has_wb and self.whiteBalanceController.has_match_reference_image()
+        reference_name = self.whiteBalanceController.get_match_reference_name() if has_reference else None
+
+        self.label_reference_name.setText(
+            f"Reference: {reference_name}" if reference_name is not None else "Reference: none"
+        )
+        self.btn_load_reference.setEnabled(has_wb)
+        self.btn_clear_reference.setEnabled(has_reference)
+        self.btn_match_reference.setEnabled(has_reference and has_wb)
+        self._set_preview_image(self.whiteBalanceController.get_match_reference_image() if has_reference else None)
+
+    def load_reference_image(self):
+        if self.whiteBalanceController is None:
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Reference Smear Image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)",
+        )
+        if not file_path:
+            return
+
+        success = self.whiteBalanceController.load_match_reference_image(file_path)
+        if not success:
+            QMessageBox.warning(
+                self,
+                "Reference Match",
+                "That image could not be loaded. Try a standard JPG or PNG smear image.",
+            )
+            return
+
+        self.label_status.setText("Reference loaded. Start live view on a representative field, then click Match Current Frame To Reference.")
+        self.refresh_state()
+
+    def clear_reference_image(self):
+        if self.whiteBalanceController is None:
+            return
+        self.whiteBalanceController.clear_match_reference_image()
+        self.label_status.setText("Reference cleared.")
+        self.refresh_state()
+
+    def _apply_brightness_ratio(self, brightness_ratio):
+        if self.liveControlWidget is None:
+            return
+
+        exposure_widget = self.liveControlWidget.entry_exposureTime
+        illumination_widget = self.liveControlWidget.entry_illuminationIntensity
+
+        current_illumination = max(1.0, float(illumination_widget.value()))
+        current_exposure = max(float(exposure_widget.minimum()), float(exposure_widget.value()))
+
+        target_illumination = float(np.clip(
+            current_illumination * brightness_ratio,
+            max(1.0, float(illumination_widget.minimum())),
+            float(illumination_widget.maximum()),
+        ))
+        applied_illumination_ratio = target_illumination / current_illumination
+        remaining_ratio = float(np.clip(
+            brightness_ratio / max(applied_illumination_ratio, 1e-6),
+            0.5,
+            2.0,
+        ))
+        target_exposure = float(np.clip(
+            current_exposure * remaining_ratio,
+            float(exposure_widget.minimum()),
+            float(exposure_widget.maximum()),
+        ))
+
+        illumination_widget.setValue(target_illumination)
+        exposure_widget.setValue(target_exposure)
+
+    def match_current_frame_to_reference(self):
+        if self.whiteBalanceController is None:
+            return
+
+        if not self.whiteBalanceController.has_match_reference_image():
+            QMessageBox.information(
+                self,
+                "Reference Match",
+                "Load a smear reference image first.",
+            )
+            return
+
+        if not self.whiteBalanceController.has_latest_rgb_image():
+            QMessageBox.information(
+                self,
+                "Reference Match",
+                "No live RGB frame is available yet. Start live view on a representative field first.",
+            )
+            return
+
+        match = self.whiteBalanceController.auto_match_to_reference_image()
+        if match is None:
+            QMessageBox.warning(
+                self,
+                "Reference Match",
+                "The current frame could not be matched to the reference. Try a color brightfield field with a good monolayer view.",
+            )
+            return
+
+        if self.checkbox_adjust_hardware.isChecked():
+            self._apply_brightness_ratio(match['brightness_ratio'])
+
+        self.label_status.setText(
+            "Matched current frame: "
+            f"R {match['gains'][0]:.2f}, G {match['gains'][1]:.2f}, B {match['gains'][2]:.2f}, "
+            f"gamma {match['gamma']:.2f}, saturation {match['saturation']:.2f}, "
+            f"brightness {match['brightness_ratio']:.2f}x."
+        )
+        self._sync_dependents()
         self.refresh_state()
 
 
