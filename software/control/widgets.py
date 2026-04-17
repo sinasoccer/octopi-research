@@ -2454,8 +2454,19 @@ class SlideScanColorTuningWidget(QFrame):
         self.entry_saturation.setDecimals(2)
         self.entry_saturation.valueChanged.connect(self.set_manual_saturation)
 
+        self.checkbox_detail_boost = QCheckBox("Enhance Nuclear Detail")
+        self.checkbox_detail_boost.toggled.connect(self.toggle_detail_boost)
+
+        self.entry_detail_boost = QDoubleSpinBox()
+        self.entry_detail_boost.setRange(0.0, 1.0)
+        self.entry_detail_boost.setSingleStep(0.05)
+        self.entry_detail_boost.setDecimals(2)
+        self.entry_detail_boost.valueChanged.connect(self.set_detail_boost_strength)
+
         self.btn_match_smear = QPushButton("Start From Smear Match")
         self.btn_match_smear.clicked.connect(self.apply_smear_match)
+        self.btn_blood_film_review = QPushButton("Blood Film Review")
+        self.btn_blood_film_review.clicked.connect(self.apply_blood_film_review)
 
         gains_row = QHBoxLayout()
         gains_row.addWidget(QLabel("R"))
@@ -2470,14 +2481,22 @@ class SlideScanColorTuningWidget(QFrame):
         tone_row.addWidget(self.entry_gamma)
         tone_row.addWidget(QLabel("Saturation"))
         tone_row.addWidget(self.entry_saturation)
+        tone_row.addWidget(self.checkbox_detail_boost)
+        tone_row.addWidget(QLabel("Strength"))
+        tone_row.addWidget(self.entry_detail_boost)
         tone_row.addStretch(1)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.btn_match_smear)
+        button_row.addWidget(self.btn_blood_film_review)
+        button_row.addStretch(1)
 
         layout = QVBoxLayout()
         layout.addWidget(self.label_hint)
         layout.addWidget(self.checkbox_enable)
         layout.addLayout(gains_row)
         layout.addLayout(tone_row)
-        layout.addWidget(self.btn_match_smear)
+        layout.addLayout(button_row)
         self.setLayout(layout)
         self.refresh_state()
 
@@ -2491,6 +2510,8 @@ class SlideScanColorTuningWidget(QFrame):
         gains = self.whiteBalanceController.get_gains() if has_wb else (1.0, 1.0, 1.0)
         gamma = self.whiteBalanceController.get_gamma() if has_wb else 1.0
         saturation = self.whiteBalanceController.get_saturation() if has_wb else 1.0
+        detail_boost_enabled = self.whiteBalanceController.is_detail_boost_enabled() if has_wb else False
+        detail_boost_strength = self.whiteBalanceController.get_detail_boost_strength() if has_wb else 0.0
 
         self.checkbox_enable.blockSignals(True)
         self.checkbox_enable.setChecked(enabled)
@@ -2510,13 +2531,20 @@ class SlideScanColorTuningWidget(QFrame):
         for widget, value in (
             (self.entry_gamma, gamma),
             (self.entry_saturation, saturation),
+            (self.entry_detail_boost, detail_boost_strength),
         ):
             widget.blockSignals(True)
             widget.setValue(value)
             widget.blockSignals(False)
             widget.setEnabled(has_wb)
 
+        self.checkbox_detail_boost.blockSignals(True)
+        self.checkbox_detail_boost.setChecked(detail_boost_enabled)
+        self.checkbox_detail_boost.blockSignals(False)
+        self.checkbox_detail_boost.setEnabled(has_wb)
+
         self.btn_match_smear.setEnabled(has_wb)
+        self.btn_blood_film_review.setEnabled(has_wb)
 
     def toggle_enabled(self, checked):
         if self.whiteBalanceController is None:
@@ -2558,13 +2586,50 @@ class SlideScanColorTuningWidget(QFrame):
             self.checkbox_enable.setChecked(True)
             self.checkbox_enable.blockSignals(False)
 
+    def toggle_detail_boost(self, checked):
+        if self.whiteBalanceController is None:
+            return
+        self.whiteBalanceController.set_detail_boost_enabled(checked)
+        self.whiteBalanceController.set_enabled(True)
+        self._sync_embedded_white_balance_widget()
+        if not self.checkbox_enable.isChecked():
+            self.checkbox_enable.blockSignals(True)
+            self.checkbox_enable.setChecked(True)
+            self.checkbox_enable.blockSignals(False)
+
+    def set_detail_boost_strength(self, value):
+        if self.whiteBalanceController is None:
+            return
+        self.whiteBalanceController.set_detail_boost_strength(value)
+        self.whiteBalanceController.set_enabled(True)
+        self._sync_embedded_white_balance_widget()
+        if not self.checkbox_detail_boost.isChecked():
+            self.checkbox_detail_boost.blockSignals(True)
+            self.checkbox_detail_boost.setChecked(True)
+            self.checkbox_detail_boost.blockSignals(False)
+        if not self.checkbox_enable.isChecked():
+            self.checkbox_enable.blockSignals(True)
+            self.checkbox_enable.setChecked(True)
+            self.checkbox_enable.blockSignals(False)
+
     def apply_smear_match(self):
         if self.whiteBalanceController is None:
             return
 
         self.whiteBalanceController.set_gains(r=0.90, g=1.15, b=0.75)
-        self.whiteBalanceController.set_gamma(1.00)
-        self.whiteBalanceController.set_saturation(0.88)
+        self.whiteBalanceController.set_gamma(0.92)
+        self.whiteBalanceController.set_saturation(0.82)
+        self.whiteBalanceController.set_detail_boost_enabled(False)
+        self.whiteBalanceController.set_detail_boost_strength(0.0)
+        self.whiteBalanceController.set_enabled(True)
+        self._sync_embedded_white_balance_widget()
+        self.refresh_state()
+
+    def apply_blood_film_review(self):
+        if self.whiteBalanceController is None:
+            return
+
+        self.whiteBalanceController.apply_blood_film_review_preset()
         self.whiteBalanceController.set_enabled(True)
         self._sync_embedded_white_balance_widget()
         self.refresh_state()

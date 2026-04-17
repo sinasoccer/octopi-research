@@ -102,6 +102,8 @@ class WhiteBalanceController:
         self._gains = np.array(gains, dtype=np.float32)
         self._gamma = 1.0
         self._saturation = 1.0
+        self._detail_boost_enabled = False
+        self._detail_boost_strength = 0.0
         self._reference_image = None
         self._latest_image = None
         self._latest_full_image = None
@@ -186,6 +188,8 @@ class WhiteBalanceController:
         flatfield_enabled = state.get('flatfield_enabled')
         gamma = state.get('gamma')
         saturation = state.get('saturation')
+        detail_boost_enabled = state.get('detail_boost_enabled')
+        detail_boost_strength = state.get('detail_boost_strength')
 
         if isinstance(gains, list) and len(gains) == 3:
             self._gains = np.array(gains, dtype=np.float32)
@@ -197,6 +201,10 @@ class WhiteBalanceController:
             self._gamma = float(np.clip(gamma, 0.4, 2.5))
         if saturation is not None:
             self._saturation = float(np.clip(saturation, 0.25, 2.5))
+        if detail_boost_enabled is not None:
+            self._detail_boost_enabled = bool(detail_boost_enabled)
+        if detail_boost_strength is not None:
+            self._detail_boost_strength = float(np.clip(detail_boost_strength, 0.0, 1.0))
 
     def _save_state(self):
         if not self._settings_path:
@@ -213,6 +221,8 @@ class WhiteBalanceController:
                 'flatfield_enabled': self._flatfield_enabled,
                 'gamma': float(self._gamma),
                 'saturation': float(self._saturation),
+                'detail_boost_enabled': bool(self._detail_boost_enabled),
+                'detail_boost_strength': float(self._detail_boost_strength),
             }
 
         try:
@@ -280,6 +290,14 @@ class WhiteBalanceController:
         with self._lock:
             return float(self._saturation)
 
+    def is_detail_boost_enabled(self):
+        with self._lock:
+            return bool(self._detail_boost_enabled)
+
+    def get_detail_boost_strength(self):
+        with self._lock:
+            return float(self._detail_boost_strength)
+
     def set_gains(self, r=None, g=None, b=None):
         with self._lock:
             if r is not None:
@@ -300,11 +318,33 @@ class WhiteBalanceController:
             self._saturation = float(np.clip(saturation, 0.25, 2.5))
         self._save_state()
 
+    def set_detail_boost_enabled(self, enabled):
+        with self._lock:
+            self._detail_boost_enabled = bool(enabled)
+        self._save_state()
+
+    def set_detail_boost_strength(self, strength):
+        with self._lock:
+            self._detail_boost_strength = float(np.clip(strength, 0.0, 1.0))
+        self._save_state()
+
+    def apply_blood_film_review_preset(self):
+        with self._lock:
+            self._gains[:] = np.array((0.88, 1.10, 0.74), dtype=np.float32)
+            self._gamma = 0.82
+            self._saturation = 0.74
+            self._detail_boost_enabled = True
+            self._detail_boost_strength = 0.38
+            self._enabled = True
+        self._save_state()
+
     def reset(self):
         with self._lock:
             self._gains[:] = 1.0
             self._gamma = 1.0
             self._saturation = 1.0
+            self._detail_boost_enabled = False
+            self._detail_boost_strength = 0.0
             self._enabled = False
         self._save_state()
 
@@ -361,6 +401,8 @@ class WhiteBalanceController:
                 'gains': [float(value) for value in self._gains],
                 'gamma': float(self._gamma),
                 'saturation': float(self._saturation),
+                'detail_boost_enabled': bool(self._detail_boost_enabled),
+                'detail_boost_strength': float(self._detail_boost_strength),
                 'flatfield_enabled': bool(self._flatfield_enabled and self._flatfield_reference is not None),
                 'has_flatfield': self._flatfield_reference is not None,
             }
@@ -385,6 +427,8 @@ class WhiteBalanceController:
         enabled = bool(profile.get('enabled', False))
         gamma = float(profile.get('gamma', 1.0))
         saturation = float(profile.get('saturation', 1.0))
+        detail_boost_enabled = bool(profile.get('detail_boost_enabled', False))
+        detail_boost_strength = float(profile.get('detail_boost_strength', 0.0))
         flatfield_enabled = bool(profile.get('flatfield_enabled', False))
         has_flatfield = bool(profile.get('has_flatfield', False))
 
@@ -393,6 +437,8 @@ class WhiteBalanceController:
                 self._gains = np.array(gains, dtype=np.float32)
                 self._gamma = float(np.clip(gamma, 0.4, 2.5))
                 self._saturation = float(np.clip(saturation, 0.25, 2.5))
+                self._detail_boost_enabled = bool(detail_boost_enabled)
+                self._detail_boost_strength = float(np.clip(detail_boost_strength, 0.0, 1.0))
                 self._enabled = enabled
             self._save_state()
 
@@ -530,11 +576,11 @@ class WhiteBalanceController:
         if abs(current_mid_log) < 1e-6:
             gamma = 1.0
         else:
-            gamma = float(np.clip(np.log(reference_mid) / current_mid_log, 0.5, 1.8))
+            gamma = float(np.clip(np.log(reference_mid) / current_mid_log, 0.65, 1.05))
 
         current_sat = float(np.clip(np.median(current_saturation[current_tissue_mask]), 1.0, 255.0))
         reference_sat = float(np.clip(np.median(reference_saturation[reference_tissue_mask]), 1.0, 255.0))
-        saturation = float(np.clip(reference_sat / current_sat, 0.4, 1.6))
+        saturation = float(np.clip(reference_sat / current_sat, 0.35, 1.2))
 
         chroma_error = float(np.mean(np.abs(
             (reference_channel_means / np.sum(reference_channel_means))
@@ -801,6 +847,26 @@ class WhiteBalanceController:
 
         return corrected.astype(target_dtype, copy=False)
 
+    def _apply_detail_boost(self, image, strength, max_value):
+        if image is None:
+            return image
+
+        strength = float(np.clip(strength, 0.0, 1.0))
+        if strength <= 1e-6:
+            return image
+
+        normalized = np.clip(image / max(max_value, 1e-6), 0.0, 1.0)
+        rgb8 = np.ascontiguousarray((normalized * 255.0).astype(np.uint8))
+        lab = cv2.cvtColor(rgb8, cv2.COLOR_RGB2LAB)
+        base_l = lab[:, :, 0]
+        clip_limit = 1.5 + 3.5 * strength
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        boosted_l = clahe.apply(base_l)
+        lifted_l = cv2.addWeighted(base_l, 1.0 - strength, boosted_l, strength, 0.0)
+        lab[:, :, 0] = lifted_l
+        boosted_rgb8 = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB).astype(np.float32, copy=False)
+        return boosted_rgb8 * (max_value / 255.0)
+
     def apply(self, image):
         corrected = self._apply_flatfield_correction(image)
 
@@ -815,6 +881,8 @@ class WhiteBalanceController:
             gains = self._gains.copy()
             gamma = float(self._gamma)
             saturation = float(self._saturation)
+            detail_boost_enabled = bool(self._detail_boost_enabled)
+            detail_boost_strength = float(self._detail_boost_strength)
 
         balanced = corrected.astype(np.float32, copy=False) * gains.reshape((1, 1, 3))
 
@@ -829,6 +897,14 @@ class WhiteBalanceController:
                 max_value = float(max(np.nanpercentile(balanced, 99.9), 1.0))
             normalized = np.clip(balanced / max(max_value, 1e-6), 0.0, 1.0)
             balanced = np.power(normalized, gamma).astype(np.float32, copy=False) * max_value
+        else:
+            if np.issubdtype(corrected.dtype, np.integer):
+                max_value = float(np.iinfo(corrected.dtype).max)
+            else:
+                max_value = float(max(np.nanpercentile(balanced, 99.9), 1.0))
+
+        if detail_boost_enabled:
+            balanced = self._apply_detail_boost(balanced, detail_boost_strength, max_value)
 
         if np.issubdtype(corrected.dtype, np.integer):
             info = np.iinfo(corrected.dtype)
