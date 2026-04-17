@@ -1999,6 +1999,7 @@ class SlidePositionControlWorker(QObject):
             self.signal_resume_live.emit()
 
         self.slidePositionController.slide_loading_position_reached = True
+        self.slidePositionController.slide_scanning_position_reached = False
         self.finished.emit()
 
     def move_to_slide_scanning_position(self):
@@ -2087,6 +2088,7 @@ class SlidePositionControlWorker(QObject):
         if was_live:
             self.signal_resume_live.emit()
 
+        self.slidePositionController.slide_loading_position_reached = False
         self.slidePositionController.slide_scanning_position_reached = True
         self.finished.emit()
 
@@ -2109,6 +2111,8 @@ class SlidePositionController(QObject):
         self.thread = None
 
     def move_to_slide_loading_position(self):
+        self.slide_loading_position_reached = False
+        self.slide_scanning_position_reached = False
         # create a QThread object
         self.thread = QThread()
         # create a worker object
@@ -2128,6 +2132,8 @@ class SlidePositionController(QObject):
         self.thread.start()
 
     def move_to_slide_scanning_position(self):
+        self.slide_loading_position_reached = False
+        self.slide_scanning_position_reached = False
     	# create a QThread object
         self.thread = QThread()
         # create a worker object
