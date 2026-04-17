@@ -1440,6 +1440,48 @@ class LiveControlWidget(QFrame):
         self.signal_newAnalogGain.emit(self.entry_analogGain.value())
         self.signal_newExposureTime.emit(self.entry_exposureTime.value())
 
+    def _set_spinbox_value(self, widget, value):
+        widget.blockSignals(True)
+        widget.setValue(value)
+        widget.blockSignals(False)
+
+    def _set_combobox_text(self, widget, value):
+        widget.blockSignals(True)
+        widget.setCurrentText(value)
+        widget.blockSignals(False)
+
+    def _set_illumination_value(self, value):
+        self.entry_illuminationIntensity.blockSignals(True)
+        self.entry_illuminationIntensity.setValue(value)
+        self.entry_illuminationIntensity.blockSignals(False)
+        self.slider_illuminationIntensity.blockSignals(True)
+        self.slider_illuminationIntensity.setValue(int(round(value)))
+        self.slider_illuminationIntensity.blockSignals(False)
+
+    def apply_preset_values(self, configuration_name=None, exposure_time_ms=None, analog_gain=None, illumination_intensity=None):
+        if configuration_name and self.dropdown_modeSelection.findText(configuration_name) >= 0:
+            self._set_combobox_text(self.dropdown_modeSelection, configuration_name)
+            self.update_microscope_mode_by_name(configuration_name)
+
+        if exposure_time_ms is not None:
+            exposure_time_ms = float(exposure_time_ms)
+            self._set_spinbox_value(self.entry_exposureTime, exposure_time_ms)
+            self.update_config_exposure_time(exposure_time_ms)
+
+        if analog_gain is not None:
+            analog_gain = float(analog_gain)
+            self._set_spinbox_value(self.entry_analogGain, analog_gain)
+            self.update_config_analog_gain(analog_gain)
+
+        if illumination_intensity is not None:
+            illumination_intensity = float(illumination_intensity)
+            self._set_illumination_value(illumination_intensity)
+            self.update_config_illumination_intensity(illumination_intensity)
+
+        self.update_camera_settings()
+        self.update()
+        self.repaint()
+
     def update_microscope_mode_by_name(self,current_microscope_mode_name):
         self.is_switching_mode = True
         # identify the mode selected (note that this references the object in self.configurationManager.configurations)
@@ -2772,6 +2814,7 @@ class SlideScanAcquisitionWidget(QFrame):
         preset_row.addWidget(QLabel("Preset"))
         preset_row.addWidget(self.scanWidget.dropdown_presets, 1)
         preset_row.addWidget(self.scanWidget.btn_load_preset)
+        preset_row.addWidget(self.scanWidget.btn_apply_preset)
         preset_row.addWidget(self.scanWidget.entry_preset_name, 1)
         preset_row.addWidget(self.scanWidget.btn_save_preset)
         preset_row.addWidget(self.scanWidget.btn_delete_preset)
@@ -2860,6 +2903,7 @@ class SlideScanAcquisitionWidget(QFrame):
         layout.addWidget(self.sampleSettingsWidget)
         layout.addLayout(saving_row)
         layout.addLayout(preset_row)
+        layout.addWidget(self.scanWidget.label_preset_status)
         layout.addLayout(meta_row)
         layout.addLayout(geometry_row)
         layout.addWidget(planner_hint)
@@ -4664,6 +4708,13 @@ class MultiPointWidgetGrid(QFrame):
         if self.liveControlWidget is None:
             return {}
 
+        for widget in (
+            self.liveControlWidget.entry_exposureTime,
+            self.liveControlWidget.entry_analogGain,
+            self.liveControlWidget.entry_illuminationIntensity,
+        ):
+            widget.interpretText()
+
         return {
             'live_configuration': self.liveControlWidget.dropdown_modeSelection.currentText(),
             'live_exposure_time_ms': float(self.liveControlWidget.entry_exposureTime.value()),
@@ -4675,16 +4726,18 @@ class MultiPointWidgetGrid(QFrame):
         if self.liveControlWidget is None:
             return
 
-        configuration_name = preset_data.get('live_configuration')
-        if configuration_name and self.liveControlWidget.dropdown_modeSelection.findText(configuration_name) >= 0:
-            self.liveControlWidget.dropdown_modeSelection.setCurrentText(configuration_name)
+        self.liveControlWidget.apply_preset_values(
+            configuration_name=preset_data.get('live_configuration'),
+            exposure_time_ms=preset_data.get('live_exposure_time_ms'),
+            analog_gain=preset_data.get('live_analog_gain'),
+            illumination_intensity=preset_data.get('live_illumination_intensity'),
+        )
 
-        if 'live_exposure_time_ms' in preset_data:
-            self.liveControlWidget.entry_exposureTime.setValue(float(preset_data['live_exposure_time_ms']))
-        if 'live_analog_gain' in preset_data:
-            self.liveControlWidget.entry_analogGain.setValue(float(preset_data['live_analog_gain']))
-        if 'live_illumination_intensity' in preset_data:
-            self.liveControlWidget.entry_illuminationIntensity.setValue(float(preset_data['live_illumination_intensity']))
+        if self.cameraSettingsWidget is not None:
+            if hasattr(self.cameraSettingsWidget, 'set_exposure_time') and 'live_exposure_time_ms' in preset_data:
+                self.cameraSettingsWidget.set_exposure_time(float(preset_data['live_exposure_time_ms']))
+            if hasattr(self.cameraSettingsWidget, 'set_analog_gain') and 'live_analog_gain' in preset_data:
+                self.cameraSettingsWidget.set_analog_gain(float(preset_data['live_analog_gain']))
 
     def collect_preset_data(self):
         preset_data = {
@@ -4760,6 +4813,7 @@ class MultiPointWidgetGrid(QFrame):
             self._refresh_correction_ui()
 
         self.update_coordinates()
+        QApplication.processEvents()
 
     def save_current_preset(self):
         preset_name = self.entry_preset_name.text().strip() or self.dropdown_presets.currentText().strip()
