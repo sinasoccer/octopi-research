@@ -4263,6 +4263,7 @@ class NavigationViewer(QFrame):
         self.acquisition_size = Acquisition.CROP_HEIGHT
         self.x_mm = None
         self.y_mm = None
+        self.last_drawn_fov_bounds = None
         self.acquisition_started = False
         self.scan_planner_bounds_mm = None
         self.scan_planner_visible = False
@@ -4616,11 +4617,10 @@ class NavigationViewer(QFrame):
             self.draw_current_fov(self.x_mm, self.y_mm)
 
         elif self.x_mm is not None and self.y_mm is not None:
-            # update only when the displacement has exceeded certain value
-            should_redraw = abs(x_mm - self.x_mm) > self.location_update_threshold_mm or abs(y_mm - self.y_mm) > self.location_update_threshold_mm
             self.x_mm = x_mm
             self.y_mm = y_mm
             self.refresh_status_labels()
+            should_redraw = self.get_FOV_pixel_coordinates(x_mm, y_mm) != self.last_drawn_fov_bounds
             if should_redraw:
                 self.draw_current_fov(x_mm, y_mm)
                 # update_live_scan_grid
@@ -4659,9 +4659,11 @@ class NavigationViewer(QFrame):
     def draw_current_fov(self, x_mm, y_mm):
         self.fov_overlay.fill(0)
         if x_mm is None or y_mm is None:
+            self.last_drawn_fov_bounds = None
             self.fov_overlay_item.setImage(self.fov_overlay)
             return
         current_FOV_top_left, current_FOV_bottom_right = self.get_FOV_pixel_coordinates(x_mm, y_mm)
+        self.last_drawn_fov_bounds = (current_FOV_top_left, current_FOV_bottom_right)
         cv2.rectangle(self.fov_overlay, current_FOV_top_left, current_FOV_bottom_right, (255, 90, 90, 64), -1)
         cv2.rectangle(self.fov_overlay, current_FOV_top_left, current_FOV_bottom_right, (255, 90, 90, 255), max(2, self.box_line_thickness))
         center = (
