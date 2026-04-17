@@ -4076,9 +4076,10 @@ class MultiPointWidgetGrid(QFrame):
         self.checkbox_stitchOutput.setChecked(False)
 
         self.btn_startAcquisition = QPushButton('Start\n Acquisition ')
-        self.btn_startAcquisition.setStyleSheet("background-color: #C2C2FF")
         self.btn_startAcquisition.setCheckable(True)
         self.btn_startAcquisition.setChecked(False)
+        self.scan_abort_pending = False
+        self.update_scan_button_state("idle")
         #self.btn_startAcquisition.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.progress_label = QLabel('Region -/-')
@@ -4266,6 +4267,20 @@ class MultiPointWidgetGrid(QFrame):
         self.btn_delete_preset.clicked.connect(self.delete_selected_preset)
 
         self.refresh_preset_list()
+
+    def update_scan_button_state(self, state):
+        if state == "running":
+            self.btn_startAcquisition.setText("Stop Scan")
+            self.btn_startAcquisition.setStyleSheet("background-color: #FFB3B3; color: #6B0000; font-weight: 600;")
+            self.btn_startAcquisition.setEnabled(True)
+        elif state == "stopping":
+            self.btn_startAcquisition.setText("Stopping...")
+            self.btn_startAcquisition.setStyleSheet("background-color: #FFD9A8; color: #7A4B00; font-weight: 600;")
+            self.btn_startAcquisition.setEnabled(False)
+        else:
+            self.btn_startAcquisition.setText("Start Scan")
+            self.btn_startAcquisition.setStyleSheet("background-color: #C2C2FF; color: #111111; font-weight: 600;")
+            self.btn_startAcquisition.setEnabled(True)
 
     def enable_manual_ROI(self, enable):
         self.combobox_shape.model().item(2).setEnabled(enable)
@@ -5068,12 +5083,14 @@ class MultiPointWidgetGrid(QFrame):
     def toggle_acquisition(self, pressed):
         if not self.base_path_is_set:
             self.btn_startAcquisition.setChecked(False)
+            self.update_scan_button_state("idle")
             QMessageBox.warning(self, "Warning", "Please choose base saving directory first")
             return
 
         if not self.use_coordinate_acquisition and 'glass slide' in self.navigationViewer.sample and not self.well_selected:
         #if self.navigationViewer.sample != 'glass slide' and self.well_selected == False:
             self.btn_startAcquisition.setChecked(False)
+            self.update_scan_button_state("idle")
             msg = QMessageBox()
             msg.setText("Please select a well to scan first")
             msg.exec_()
@@ -5081,11 +5098,14 @@ class MultiPointWidgetGrid(QFrame):
 
         if not self.list_configurations.selectedItems():
             self.btn_startAcquisition.setChecked(False)
+            self.update_scan_button_state("idle")
             QMessageBox.warning(self, "Warning", "Please select at least one imaging channel")
             return
 
         if pressed:
+            self.scan_abort_pending = False
             self.setEnabled_all(False)
+            self.update_scan_button_state("running")
 
             scan_size_mm = self.entry_scan_size.value()
             overlap_percent = self.entry_overlap.value()
@@ -5173,12 +5193,16 @@ class MultiPointWidgetGrid(QFrame):
                 else:
                     self.multipointController.run_acquisition() # wellplate
         else:
+            self.scan_abort_pending = True
             self.multipointController.request_abort_aquisition()
-            self.setEnabled_all(True)
+            self.progress_label.setText("Stopping scan...")
+            self.update_scan_button_state("stopping")
 
     def acquisition_is_finished(self):
+        self.scan_abort_pending = False
         self.signal_acquisition_started.emit(False)
         self.btn_startAcquisition.setChecked(False)
+        self.update_scan_button_state("idle")
         if self.scan_planner_active:
             self.update_coordinates()
         else:
