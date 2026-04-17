@@ -1236,7 +1236,7 @@ class LiveControlWidget(QFrame):
         self.streamHandler = streamHandler
         self.configurationManager = configurationManager
         self.fps_trigger = 10
-        self.fps_display = 10
+        self.fps_display = 20
         self.liveController.set_trigger_fps(self.fps_trigger)
         self.streamHandler.set_display_fps(self.fps_display)
 
@@ -5877,7 +5877,7 @@ class NapariLiveWidget(QWidget):
         self.previous_center = None
         self.last_was_autofocus = False
         self.fps_trigger = 10
-        self.fps_display = 10
+        self.fps_display = 20
         self.contrastManager = contrastManager
 
         self.initNapariViewer()

@@ -925,18 +925,25 @@ class StreamHandler(QObject):
             # @@@ to move to camera
             image_cropped = utils.rotate_and_flip_image(image_cropped,rotate_image_angle=camera.rotate_image_angle,flip_image=camera.flip_image)
 
+            display_width = round(self.crop_width * self.display_resolution_scaling)
+            display_height = round(self.crop_height * self.display_resolution_scaling)
+            image_for_display = utils.crop_image(image_cropped, display_width, display_height)
+
             if self.whiteBalanceController is not None:
-                display_width = round(self.crop_width * self.display_resolution_scaling)
-                display_height = round(self.crop_height * self.display_resolution_scaling)
-                display_reference_image = utils.crop_image(image_cropped, display_width, display_height)
-                self.whiteBalanceController.update_reference_image(display_reference_image, full_image=image_cropped)
-                image_cropped = self.whiteBalanceController.apply(image_cropped)
+                self.whiteBalanceController.update_reference_image(image_for_display, full_image=image_cropped)
+                corrections_enabled = (
+                    self.whiteBalanceController.is_enabled()
+                    or self.whiteBalanceController.is_flatfield_enabled()
+                )
+                if corrections_enabled:
+                    image_for_display = self.whiteBalanceController.apply(image_for_display)
+                    if self.save_image_flag or self.track_flag:
+                        image_cropped = self.whiteBalanceController.apply(image_cropped)
 
             # send image to display
             time_now = time.time()
             if time_now-self.timestamp_last_display >= 1/self.fps_display:
-                # self.image_to_display.emit(cv2.resize(image_cropped,(round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling)),cv2.INTER_LINEAR))
-                self.image_to_display.emit(utils.crop_image(image_cropped,round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling)))
+                self.image_to_display.emit(image_for_display)
                 self.timestamp_last_display = time_now
 
             # send image to write
@@ -1128,43 +1135,33 @@ class ImageDisplay(QObject):
 
     def __init__(self):
         QObject.__init__(self)
-        self.queue = Queue(10) # max 10 items in the queue
         self.image_lock = Lock()
-        self.stop_signal_received = False
-        self.thread = Thread(target=self.process_queue)
-        self.thread.start()
-
-    def process_queue(self):
-        while True:
-            # stop the thread if stop signal is received
-            if self.stop_signal_received:
-                return
-            # process the queue
-            try:
-                [image,frame_ID,timestamp] = self.queue.get(timeout=0.1)
-                self.image_lock.acquire(True)
-                self.image_to_display.emit(image)
-                self.image_lock.release()
-                self.queue.task_done()
-            except:
-                pass
+        self.pending_image = None
+        self.timer = QTimer(self)
+        self.timer.setInterval(15)
+        self.timer.timeout.connect(self.flush_pending_image)
+        self.timer.start()
 
     # def enqueue(self,image,frame_ID,timestamp):
     def enqueue(self,image):
-        try:
-            self.queue.put_nowait([image,None,None])
-            # when using self.queue.put(str_) instead of try + nowait, program can be slowed down despite multithreading because of the block and the GIL
-            pass
-        except:
-            print('imageDisplay queue is full, image discarded')
+        with self.image_lock:
+            self.pending_image = image
+
+    def flush_pending_image(self):
+        with self.image_lock:
+            image = self.pending_image
+            self.pending_image = None
+
+        if image is not None:
+            self.image_to_display.emit(image)
 
     def emit_directly(self,image):
         self.image_to_display.emit(image)
 
     def close(self):
-        self.queue.join()
-        self.stop_signal_received = True
-        self.thread.join()
+        self.timer.stop()
+        with self.image_lock:
+            self.pending_image = None
 
 class Configuration:
     def __init__(self,mode_id=None,name=None,color=None,camera_sn=None,exposure_time=None,analog_gain=None,illumination_source=None,illumination_intensity=None,z_offset=None,pixel_format=None,_pixel_format_options=None,emission_filter_position=None):
@@ -1509,6 +1506,9 @@ class NavigationController(QObject):
         self.click_to_move = ENABLE_CLICK_TO_MOVE_BY_DEFAULT # default on when acquisition not running
         self.theta_microstepping = MICROSTEPPING_DEFAULT_THETA
         self.enable_joystick_button_action = True
+        self.ui_update_interval_s = 1/30
+        self._last_ui_emit_time = 0.0
+        self._last_emitted_position = None
 
         # to be moved to gui for transparency
         self.microcontroller.set_callback(self.update_pos)
@@ -1673,12 +1673,35 @@ class NavigationController(QObject):
             self.theta_pos_rad = theta_pos*ENCODER_POS_SIGN_THETA*ENCODER_STEP_SIZE_THETA
         else:
             self.theta_pos_rad = theta_pos*STAGE_POS_SIGN_THETA*(2*math.pi/(self.theta_microstepping*FULLSTEPS_PER_REV_THETA))
-        # emit the updated position
-        self.xPos.emit(self.x_pos_mm)
-        self.yPos.emit(self.y_pos_mm)
-        self.zPos.emit(self.z_pos_mm*1000)
-        self.thetaPos.emit(self.theta_pos_rad*360/(2*math.pi))
-        self.xyPos.emit(self.x_pos_mm,self.y_pos_mm)
+        time_now = time.perf_counter()
+        should_emit = False
+        if self._last_emitted_position is None:
+            should_emit = True
+        elif time_now - self._last_ui_emit_time >= self.ui_update_interval_s:
+            should_emit = True
+        else:
+            last_x, last_y, last_z, last_theta = self._last_emitted_position
+            moved_since_last_emit = (
+                abs(self.x_pos_mm - last_x) > 1e-4
+                or abs(self.y_pos_mm - last_y) > 1e-4
+                or abs(self.z_pos_mm - last_z) > 1e-4
+                or abs(self.theta_pos_rad - last_theta) > 1e-5
+            )
+            should_emit = moved_since_last_emit and not getattr(microcontroller, 'mcu_cmd_execution_in_progress', False)
+
+        if should_emit:
+            self._last_ui_emit_time = time_now
+            self._last_emitted_position = (
+                self.x_pos_mm,
+                self.y_pos_mm,
+                self.z_pos_mm,
+                self.theta_pos_rad,
+            )
+            self.xPos.emit(self.x_pos_mm)
+            self.yPos.emit(self.y_pos_mm)
+            self.zPos.emit(self.z_pos_mm*1000)
+            self.thetaPos.emit(self.theta_pos_rad*360/(2*math.pi))
+            self.xyPos.emit(self.x_pos_mm,self.y_pos_mm)
 
         if microcontroller.signal_joystick_button_pressed_event:
             if self.enable_joystick_button_action:

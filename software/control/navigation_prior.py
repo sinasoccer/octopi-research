@@ -46,6 +46,9 @@ class NavigationController_PriorStage(QObject):
 
         # Joystick methods to be implemented
         self.enable_joystick_button_action = True
+        self.ui_update_interval_s = 1/30
+        self._last_ui_emit_time = 0.0
+        self._last_emitted_position = None
 
         # to be moved to gui for transparency
         self.stage.set_callback(self.update_pos)
@@ -212,13 +215,24 @@ class NavigationController_PriorStage(QObject):
 
         self.x_pos_mm = stage.steps_to_mm(x_pos)
         self.y_pos_mm = stage.steps_to_mm(y_pos)
+        time_now = time.perf_counter()
+        should_emit = False
+        if self._last_emitted_position is None:
+            should_emit = True
+        elif time_now - self._last_ui_emit_time >= self.ui_update_interval_s:
+            should_emit = True
+        else:
+            last_x, last_y = self._last_emitted_position
+            should_emit = abs(self.x_pos_mm - last_x) > 1e-4 or abs(self.y_pos_mm - last_y) > 1e-4
 
-        # emit the updated position
-        self.xPos.emit(self.x_pos_mm)
-        self.yPos.emit(self.y_pos_mm)
-        self.zPos.emit(self.z_pos_mm*1000)      # not in use
-        self.thetaPos.emit(1)                   # not in use
-        self.xyPos.emit(self.x_pos_mm,self.y_pos_mm)
+        if should_emit:
+            self._last_ui_emit_time = time_now
+            self._last_emitted_position = (self.x_pos_mm, self.y_pos_mm)
+            self.xPos.emit(self.x_pos_mm)
+            self.yPos.emit(self.y_pos_mm)
+            self.zPos.emit(self.z_pos_mm*1000)      # not in use
+            self.thetaPos.emit(1)                   # not in use
+            self.xyPos.emit(self.x_pos_mm,self.y_pos_mm)
 
         # Joystick button to be implemented
         if stage.signal_joystick_button_pressed_event:
