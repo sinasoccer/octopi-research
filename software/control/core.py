@@ -573,7 +573,7 @@ class WhiteBalanceController:
 
     def update_reference_image(self, image, full_image=None):
         if image is None:
-            return
+            return False
 
         if full_image is None:
             full_image = image
@@ -593,6 +593,8 @@ class WhiteBalanceController:
             self._latest_full_image = full_image
             self._latest_rgb_image = latest_rgb_image
             self._reference_image = reference_image
+
+        return reference_image is not None
 
     def _crop_image_by_bbox(self, image, roi_bounds):
         if image is None or roi_bounds is None:
@@ -2432,6 +2434,8 @@ class MultiPointWorker(QObject):
         self.do_autofocus = self.multiPointController.do_autofocus
         self.do_reflection_af= self.multiPointController.do_reflection_af
         self.af_interval = max(1, int(self.multiPointController.af_interval))
+        self.rewhite_balance_enabled = bool(self.multiPointController.rewhite_balance_enabled)
+        self.rewhite_balance_interval = max(1, int(self.multiPointController.rewhite_balance_interval))
         self.hybrid_focus_enabled = self.multiPointController.hybrid_focus_enabled
         self.crop_width = self.multiPointController.crop_width
         self.crop_height = self.multiPointController.crop_height
@@ -2446,8 +2450,10 @@ class MultiPointWorker(QObject):
         self.timestamp_acquisition_started = self.multiPointController.timestamp_acquisition_started
         self.time_point = 0
         self.af_fov_count = 0
+        self.white_balance_fov_count = 0
         self.num_fovs = 0
         self.total_scans = 0
+        self.field_has_rgb_reference = False
         if self.multiPointController.coordinate_dict is not None:
             self.coordinate_dict = self.multiPointController.coordinate_dict.copy()
         else:
@@ -2778,6 +2784,7 @@ class MultiPointWorker(QObject):
                     return
 
     def acquire_at_position(self, region_id, current_path, fov, i=None, j=None):
+        self.field_has_rgb_reference = False
 
         if RUN_CUSTOM_MULTIPOINT and "multipoint_custom_script_entry" in globals():
             print('run custom multipoint')
@@ -2876,6 +2883,8 @@ class MultiPointWorker(QObject):
 
         if self.NZ > 1:
             self.move_z_back_after_stack()
+
+        self.maybe_rewhite_balance_after_field()
 
     def run_real_time_processing(self, current_round_images, i, j, z_level):
         acquired_image_configs = list(current_round_images.keys())
@@ -3037,7 +3046,10 @@ class MultiPointWorker(QObject):
                 round(self.crop_width*self.display_resolution_scaling),
                 round(self.crop_height*self.display_resolution_scaling),
             )
-            self.whiteBalanceController.update_reference_image(display_reference_image, full_image=image)
+            self.field_has_rgb_reference = (
+                self.whiteBalanceController.update_reference_image(display_reference_image, full_image=image)
+                or self.field_has_rgb_reference
+            )
         image = self.apply_white_balance_if_needed(image)
         image_to_display = utils.crop_image(image,round(self.crop_width*self.display_resolution_scaling), round(self.crop_height*self.display_resolution_scaling))
         self.image_to_display.emit(image_to_display)
@@ -3209,7 +3221,10 @@ class MultiPointWorker(QObject):
                     round(self.crop_width * self.display_resolution_scaling),
                     round(self.crop_height * self.display_resolution_scaling),
                 )
-                self.whiteBalanceController.update_reference_image(display_reference_image, full_image=rgb_image)
+                self.field_has_rgb_reference = (
+                    self.whiteBalanceController.update_reference_image(display_reference_image, full_image=rgb_image)
+                    or self.field_has_rgb_reference
+                )
             rgb_image = self.apply_white_balance_if_needed(rgb_image)
 
             # send image to display
@@ -3231,7 +3246,10 @@ class MultiPointWorker(QObject):
                     round(self.crop_width * self.display_resolution_scaling),
                     round(self.crop_height * self.display_resolution_scaling),
                 )
-                self.whiteBalanceController.update_reference_image(display_reference_image, full_image=images[channel])
+                self.field_has_rgb_reference = (
+                    self.whiteBalanceController.update_reference_image(display_reference_image, full_image=images[channel])
+                    or self.field_has_rgb_reference
+                )
             image = self.apply_white_balance_if_needed(images[channel])
             image_to_display = utils.crop_image(image, round(self.crop_width * self.display_resolution_scaling), round(self.crop_height * self.display_resolution_scaling))
             self.image_to_display.emit(image_to_display)
@@ -3253,7 +3271,10 @@ class MultiPointWorker(QObject):
                 round(self.crop_width * self.display_resolution_scaling),
                 round(self.crop_height * self.display_resolution_scaling),
             )
-            self.whiteBalanceController.update_reference_image(display_reference_image, full_image=rgb_image)
+            self.field_has_rgb_reference = (
+                self.whiteBalanceController.update_reference_image(display_reference_image, full_image=rgb_image)
+                or self.field_has_rgb_reference
+            )
         rgb_image = self.apply_white_balance_if_needed(rgb_image)
 
         # send image to display
@@ -3272,6 +3293,26 @@ class MultiPointWorker(QObject):
         if self.whiteBalanceController is None:
             return image
         return self.whiteBalanceController.apply(image)
+
+    def maybe_rewhite_balance_after_field(self):
+        if not self.rewhite_balance_enabled or self.whiteBalanceController is None:
+            return
+
+        self.white_balance_fov_count += 1
+        if self.white_balance_fov_count % self.rewhite_balance_interval != 0:
+            return
+
+        if not self.field_has_rgb_reference:
+            print("Skipping scheduled white balance refresh: current field did not produce an RGB reference frame.")
+            return
+
+        gains = self.whiteBalanceController.auto_balance_from_reference()
+        if gains is not None:
+            print(
+                "Scheduled white balance refresh applied after "
+                f"{self.white_balance_fov_count} fields: "
+                f"R={gains[0]:.3f}, G={gains[1]:.3f}, B={gains[2]:.3f}"
+            )
 
     def get_abort_return_coordinate(self, region_id):
         if isinstance(region_id, int):
@@ -3467,6 +3508,8 @@ class MultiPointController(QObject):
         self.do_autofocus = False
         self.do_reflection_af = False
         self.af_interval = MULTIPOINT_AUTOFOCUS_INTERVAL
+        self.rewhite_balance_enabled = False
+        self.rewhite_balance_interval = 3
         self.gen_focus_map = False
         self.hybrid_focus_enabled = MULTIPOINT_HYBRID_AUTOFOCUS_ENABLE_BY_DEFAULT
         self.focus_map_storage = []
@@ -3552,6 +3595,12 @@ class MultiPointController(QObject):
 
     def set_af_interval(self, interval):
         self.af_interval = max(1, int(interval))
+
+    def set_rewhite_balance_enabled(self, enabled):
+        self.rewhite_balance_enabled = bool(enabled)
+
+    def set_rewhite_balance_interval(self, interval):
+        self.rewhite_balance_interval = max(1, int(interval))
 
     def set_gen_focus_map_flag(self, flag):
         self.gen_focus_map = flag

@@ -471,6 +471,7 @@ class OctopiGUI(QMainWindow):
             self.napariMosaicDisplayWidget,
             objectivesWidget=self.objectivesWidget,
             cameraSettingsWidget=self.cameraSettingWidget,
+            liveControlWidget=self.liveControlWidget,
         )
         self.sampleSettingsWidget = widgets.SampleSettingsWidget(self.objectivesWidget, self.wellplateFormatWidget)
 
@@ -488,6 +489,8 @@ class OctopiGUI(QMainWindow):
                 self.slideScanColorTuningWidget,
             )
             self.slideScanQuickActionsWidget.colorTuningWidget = self.slideScanColorTuningWidget
+            self.multiPointWidgetGrid.colorTuningWidget = self.slideScanColorTuningWidget
+            self.multiPointWidgetGrid.referenceMatchWidget = self.slideScanReferenceMatchWidget
             self.slideScanAcquisitionWidget = widgets.SlideScanAcquisitionWidget(
                 self.sampleSettingsWidget,
                 self.multiPointWidgetGrid,

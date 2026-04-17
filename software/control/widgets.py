@@ -2739,6 +2739,9 @@ class SlideScanAcquisitionWidget(QFrame):
     def add_components(self):
         self.scanWidget.btn_startAcquisition.setText("Start Scan")
         self.scanWidget.btn_startAcquisition.setMinimumHeight(52)
+        self.scanWidget.btn_load_preset.setText("Load")
+        self.scanWidget.btn_apply_preset.setText("Apply")
+        self.scanWidget.btn_save_preset.setText("Save")
         self.scanWidget.btn_show_scan_planner.setText("Select Path")
         self.scanWidget.btn_center_scan_planner.setText("Reset to Current View")
         self.scanWidget.checkbox_withAutofocus.setText("Refocus During Scan")
@@ -4143,6 +4146,7 @@ class MultiPointWidgetGrid(QFrame):
         napariMosaicWidget=None,
         objectivesWidget=None,
         cameraSettingsWidget=None,
+        liveControlWidget=None,
         *args,
         **kwargs
     ):
@@ -4155,6 +4159,9 @@ class MultiPointWidgetGrid(QFrame):
         self.configurationManager = configurationManager
         self.objectivesWidget = objectivesWidget
         self.cameraSettingsWidget = cameraSettingsWidget
+        self.liveControlWidget = liveControlWidget
+        self.colorTuningWidget = None
+        self.referenceMatchWidget = None
         if napariMosaicWidget is None:
             self.performance_mode = True
         else:
@@ -4174,6 +4181,8 @@ class MultiPointWidgetGrid(QFrame):
         self.scan_planner_bounds_mm = None
         self.eta_seconds = 0
         self.presetStore = SmearScanPresetStore()
+        self.pending_preset_data = None
+        self.pending_preset_name = None
         self.add_components()
         self.setFrameStyle(QFrame.Panel | QFrame.Raised)
         self.set_default_scan_size()
@@ -4205,8 +4214,13 @@ class MultiPointWidgetGrid(QFrame):
         self.dropdown_presets = QComboBox()
         self.dropdown_presets.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_load_preset = QPushButton("Load Preset")
+        self.btn_apply_preset = QPushButton("Apply Preset")
+        self.btn_apply_preset.setEnabled(False)
         self.btn_save_preset = QPushButton("Save Preset")
         self.btn_delete_preset = QPushButton("Delete")
+        self.label_preset_status = QLabel("Choose a preset, click Load Preset, then Apply Preset.")
+        self.label_preset_status.setWordWrap(True)
+        self.label_preset_status.setStyleSheet("color: #58606B;")
 
         # Update scan size entry
         self.entry_scan_size = QDoubleSpinBox()
@@ -4329,6 +4343,11 @@ class MultiPointWidgetGrid(QFrame):
         self.checkbox_hybridAutofocus.setChecked(MULTIPOINT_HYBRID_AUTOFOCUS_ENABLE_BY_DEFAULT)
         self.multipointController.set_hybrid_focus_flag(MULTIPOINT_HYBRID_AUTOFOCUS_ENABLE_BY_DEFAULT)
 
+        self.checkbox_rewhite_balance = QCheckBox('Re-White Balance After 3 Fields')
+        self.checkbox_rewhite_balance.setChecked(False)
+        self.multipointController.set_rewhite_balance_enabled(False)
+        self.multipointController.set_rewhite_balance_interval(3)
+
         self.checkbox_set_z_range = QCheckBox('Set Z-range')
         self.checkbox_set_z_range.toggled.connect(self.toggle_z_range_controls)
 
@@ -4370,10 +4389,12 @@ class MultiPointWidgetGrid(QFrame):
         preset_layout.addWidget(QLabel('Preset'))
         preset_layout.addWidget(self.dropdown_presets)
         preset_layout.addWidget(self.btn_load_preset)
+        preset_layout.addWidget(self.btn_apply_preset)
         preset_layout.addWidget(self.entry_preset_name)
         preset_layout.addWidget(self.btn_save_preset)
         preset_layout.addWidget(self.btn_delete_preset)
         main_layout.addLayout(preset_layout)
+        main_layout.addWidget(self.label_preset_status)
 
         # Experiment ID, stain, and scan shape
         row_1_layout = QHBoxLayout()
@@ -4461,6 +4482,7 @@ class MultiPointWidgetGrid(QFrame):
             options_layout.addWidget(self.checkbox_withReflectionAutofocus)
         options_layout.addWidget(self.checkbox_genFocusMap)
         options_layout.addWidget(self.checkbox_hybridAutofocus)
+        options_layout.addWidget(self.checkbox_rewhite_balance)
         if ENABLE_OBJECTIVE_PIEZO:
             options_layout.addWidget(self.checkbox_usePiezo)
         options_layout.addWidget(self.checkbox_set_z_range)
@@ -4512,6 +4534,7 @@ class MultiPointWidgetGrid(QFrame):
         self.checkbox_withReflectionAutofocus.toggled.connect(self.multipointController.set_reflection_af_flag)
         self.checkbox_genFocusMap.toggled.connect(self.multipointController.set_gen_focus_map_flag)
         self.checkbox_hybridAutofocus.toggled.connect(self.multipointController.set_hybrid_focus_flag)
+        self.checkbox_rewhite_balance.toggled.connect(self.multipointController.set_rewhite_balance_enabled)
         self.checkbox_usePiezo.toggled.connect(self.multipointController.set_use_piezo)
         self.checkbox_stitchOutput.toggled.connect(self.display_stitcher_widget)
         self.list_configurations.itemSelectionChanged.connect(self.emit_selected_channels)
@@ -4527,7 +4550,9 @@ class MultiPointWidgetGrid(QFrame):
         if not self.performance_mode:
             self.napariMosaicWidget.signal_layers_initialized.connect(self.enable_manual_ROI)
         self.entry_NZ.valueChanged.connect(self.signal_acquisition_z_levels.emit)
+        self.dropdown_presets.currentTextChanged.connect(self.clear_pending_preset)
         self.btn_load_preset.clicked.connect(self.load_selected_preset)
+        self.btn_apply_preset.clicked.connect(self.apply_loaded_preset)
         self.btn_save_preset.clicked.connect(self.save_current_preset)
         self.btn_delete_preset.clicked.connect(self.delete_selected_preset)
 
@@ -4566,6 +4591,25 @@ class MultiPointWidgetGrid(QFrame):
     def _refresh_correction_ui(self):
         if self.cameraSettingsWidget is not None and hasattr(self.cameraSettingsWidget, 'softwareWhiteBalanceWidget'):
             self.cameraSettingsWidget.softwareWhiteBalanceWidget.refresh_from_controller()
+        if self.colorTuningWidget is not None:
+            self.colorTuningWidget.refresh_state()
+        if self.referenceMatchWidget is not None:
+            self.referenceMatchWidget.refresh_state()
+
+    def clear_pending_preset(self, preset_name=''):
+        if preset_name == self.pending_preset_name:
+            return
+        self.pending_preset_data = None
+        self.pending_preset_name = None
+        self.btn_apply_preset.setEnabled(False)
+        self.label_preset_status.setText("Choose a preset, click Load Preset, then Apply Preset.")
+
+    def _stage_loaded_preset(self, preset_name, preset_data):
+        self.pending_preset_name = preset_name
+        self.pending_preset_data = preset_data
+        self.btn_apply_preset.setEnabled(True)
+        self.entry_preset_name.setText(preset_name)
+        self.label_preset_status.setText(f"Preset loaded: {preset_name}. Click Apply Preset to update the workflow.")
 
     def _set_selected_channels(self, channels):
         selected_channels = set(channels or [])
@@ -4583,8 +4627,34 @@ class MultiPointWidgetGrid(QFrame):
             self.objectiveStore.set_current_objective(objective_name)
             self.navigationViewer.on_objective_changed()
 
-    def collect_preset_data(self):
+    def _capture_live_preset_data(self):
+        if self.liveControlWidget is None:
+            return {}
+
         return {
+            'live_configuration': self.liveControlWidget.dropdown_modeSelection.currentText(),
+            'live_exposure_time_ms': float(self.liveControlWidget.entry_exposureTime.value()),
+            'live_analog_gain': float(self.liveControlWidget.entry_analogGain.value()),
+            'live_illumination_intensity': float(self.liveControlWidget.entry_illuminationIntensity.value()),
+        }
+
+    def _apply_live_preset_data(self, preset_data):
+        if self.liveControlWidget is None:
+            return
+
+        configuration_name = preset_data.get('live_configuration')
+        if configuration_name and self.liveControlWidget.dropdown_modeSelection.findText(configuration_name) >= 0:
+            self.liveControlWidget.dropdown_modeSelection.setCurrentText(configuration_name)
+
+        if 'live_exposure_time_ms' in preset_data:
+            self.liveControlWidget.entry_exposureTime.setValue(float(preset_data['live_exposure_time_ms']))
+        if 'live_analog_gain' in preset_data:
+            self.liveControlWidget.entry_analogGain.setValue(float(preset_data['live_analog_gain']))
+        if 'live_illumination_intensity' in preset_data:
+            self.liveControlWidget.entry_illuminationIntensity.setValue(float(preset_data['live_illumination_intensity']))
+
+    def collect_preset_data(self):
+        preset_data = {
             'stain': self.entry_stain.text().strip(),
             'objective': self.objectiveStore.current_objective,
             'scan_size_mm': float(self.entry_scan_size.value()),
@@ -4605,14 +4675,18 @@ class MultiPointWidgetGrid(QFrame):
             'reflection_af': bool(self.checkbox_withReflectionAutofocus.isChecked()),
             'focus_map': bool(self.checkbox_genFocusMap.isChecked()),
             'hybrid_focus': bool(self.checkbox_hybridAutofocus.isChecked()),
+            'rewhite_balance_every_3_fields': bool(self.checkbox_rewhite_balance.isChecked()),
             'use_piezo': bool(self.checkbox_usePiezo.isChecked()),
             'use_coordinate_acquisition': bool(self.checkbox_useCoordinateAcquisition.isChecked()),
             'selected_channels': [item.text() for item in self.list_configurations.selectedItems()],
         }
+        preset_data.update(self._capture_live_preset_data())
+        return preset_data
 
     def apply_preset_data(self, preset_data):
         self.entry_stain.setText(preset_data.get('stain', ''))
         self._set_objective(preset_data.get('objective'))
+        self._apply_live_preset_data(preset_data)
 
         self.entry_scan_size.setValue(float(preset_data.get('scan_size_mm', self.entry_scan_size.value())))
         self.entry_overlap.setValue(float(preset_data.get('overlap_percent', self.entry_overlap.value())))
@@ -4641,6 +4715,7 @@ class MultiPointWidgetGrid(QFrame):
         self.checkbox_withReflectionAutofocus.setChecked(bool(preset_data.get('reflection_af', self.checkbox_withReflectionAutofocus.isChecked())))
         self.checkbox_genFocusMap.setChecked(bool(preset_data.get('focus_map', self.checkbox_genFocusMap.isChecked())))
         self.checkbox_hybridAutofocus.setChecked(bool(preset_data.get('hybrid_focus', self.checkbox_hybridAutofocus.isChecked())))
+        self.checkbox_rewhite_balance.setChecked(bool(preset_data.get('rewhite_balance_every_3_fields', self.checkbox_rewhite_balance.isChecked())))
         self.checkbox_usePiezo.setChecked(bool(preset_data.get('use_piezo', self.checkbox_usePiezo.isChecked())))
         self.checkbox_useCoordinateAcquisition.setChecked(bool(preset_data.get('use_coordinate_acquisition', self.checkbox_useCoordinateAcquisition.isChecked())))
         self._set_selected_channels(preset_data.get('selected_channels', []))
@@ -4684,8 +4759,16 @@ class MultiPointWidgetGrid(QFrame):
             QMessageBox.warning(self, "Preset", f"Could not load preset:\n{exc}")
             return
 
-        self.entry_preset_name.setText(preset_name)
-        self.apply_preset_data(preset_data)
+        self._stage_loaded_preset(preset_name, preset_data)
+
+    def apply_loaded_preset(self):
+        if self.pending_preset_data is None:
+            QMessageBox.information(self, "Preset", "Load a preset first.")
+            return
+
+        self.apply_preset_data(self.pending_preset_data)
+        self.label_preset_status.setText(f"Applied preset: {self.pending_preset_name}.")
+        self.btn_apply_preset.setEnabled(True)
 
     def delete_selected_preset(self):
         preset_name = self.dropdown_presets.currentText().strip()
@@ -4695,6 +4778,7 @@ class MultiPointWidgetGrid(QFrame):
 
         self.presetStore.delete_preset(preset_name)
         self.refresh_preset_list()
+        self.clear_pending_preset()
 
     def set_acquisition_pattern(self, pattern):
         self.acquisition_pattern = pattern
