@@ -15,6 +15,9 @@ import control.core as core
 import control.microcontroller as microcontroller
 from control._def import *
 
+if ENABLE_STITCHER:
+    import control.stitcher as stitcher
+
 import pyqtgraph.dockarea as dock
 SINGLE_WINDOW = True # set to False if use separate windows for display and control
 
@@ -25,6 +28,9 @@ class OctopiGUI(QMainWindow):
 
     def __init__(self, is_simulation = False, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.live_only_mode = LIVE_ONLY_MODE
+        self.performance_mode = False
+        self.stitcherThread = None
 
         # load window
         if ENABLE_TRACKING:
@@ -39,7 +45,8 @@ class OctopiGUI(QMainWindow):
         # image display windows
         self.imageDisplayTabs = QTabWidget()
         self.imageDisplayTabs.addTab(self.imageDisplayWindow.widget, "Live View")
-        self.imageDisplayTabs.addTab(self.imageArrayDisplayWindow.widget, "Multichannel Acquisition")
+        if not USE_NAPARI_FOR_MULTIPOINT:
+            self.imageDisplayTabs.addTab(self.imageArrayDisplayWindow.widget, "Multichannel Acquisition")
 
         # load objects
         if is_simulation:
@@ -67,6 +74,7 @@ class OctopiGUI(QMainWindow):
 
         self.objectiveStore = core.ObjectiveStore()
         self.configurationManager = core.ConfigurationManager('./channel_configurations.xml')
+        self.contrastManager = core.ContrastManager()
         self.objectiveStore = core.ObjectiveStore(parent=self) # todo: add widget to select/save objective save
         self.whiteBalanceController = core.WhiteBalanceController(
             enabled=SOFTWARE_WHITE_BALANCE_ENABLED,
@@ -123,6 +131,8 @@ class OctopiGUI(QMainWindow):
         self.multiPointWidget = widgets.MultiPointWidget(self.multipointController,self.configurationManager)
         self.navigationViewer = core.NavigationViewer(self.objectiveStore, sample=str(6)+' well plate')
         self.multiPointWidget2 = widgets.MultiPointWidget2(self.navigationController,self.navigationViewer,self.multipointController,self.configurationManager,scanCoordinates=None)
+        if ENABLE_STITCHER:
+            self.stitcherWidget = widgets.StitcherWidget(self.configurationManager, self.contrastManager)
 
         self.recordTabWidget = QTabWidget()
         if ENABLE_TRACKING:
@@ -141,6 +151,9 @@ class OctopiGUI(QMainWindow):
             layout.addWidget(self.dacControlWidget)
         layout.addWidget(self.autofocusWidget)
         layout.addWidget(self.recordTabWidget)
+        if ENABLE_STITCHER:
+            layout.addWidget(self.stitcherWidget)
+            self.stitcherWidget.hide()
         layout.addWidget(self.objectivesWidget)
         layout.addStretch()
 
@@ -207,17 +220,76 @@ class OctopiGUI(QMainWindow):
         self.multiPointWidget2.signal_acquisition_started.connect(self.navigationWidget.toggle_navigation_controls)
 
         if USE_NAPARI_FOR_MULTIPOINT:
-            self.napariMultiChannelWidget = widgets.NapariMultiChannelWidget(self.objectiveStore)
+            self.napariMultiChannelWidget = widgets.NapariMultiChannelWidget(self.objectiveStore, self.contrastManager)
             self.imageDisplayTabs.addTab(self.napariMultiChannelWidget, "Multichannel Acquisition")
             self.multiPointWidget.signal_acquisition_channels.connect(self.napariMultiChannelWidget.initChannels)
             self.multiPointWidget.signal_acquisition_shape.connect(self.napariMultiChannelWidget.initLayersShape)
-            if ENABLE_FLEXIBLE_MULTIPOINT:
-                self.multiPointWidget2.signal_acquisition_channels.connect(self.napariMultiChannelWidget.initChannels)
-                self.multiPointWidget2.signal_acquisition_shape.connect(self.napariMultiChannelWidget.initLayersShape)
+            self.multiPointWidget2.signal_acquisition_channels.connect(self.napariMultiChannelWidget.initChannels)
+            self.multiPointWidget2.signal_acquisition_shape.connect(self.napariMultiChannelWidget.initLayersShape)
 
             self.multipointController.napari_layers_init.connect(self.napariMultiChannelWidget.initLayers)
             self.multipointController.napari_layers_update.connect(self.napariMultiChannelWidget.updateLayers)
 
+        if USE_NAPARI_FOR_MOSAIC_DISPLAY:
+            self.napariMosaicDisplayWidget = widgets.NapariMosaicDisplayWidget(self.objectiveStore, self.contrastManager)
+            self.imageDisplayTabs.addTab(self.napariMosaicDisplayWidget, "Mosaic View")
+            self.multiPointWidget.signal_acquisition_channels.connect(self.napariMosaicDisplayWidget.initChannels)
+            self.multiPointWidget.signal_acquisition_shape.connect(self.napariMosaicDisplayWidget.initLayersShape)
+            self.multiPointWidget2.signal_acquisition_channels.connect(self.napariMosaicDisplayWidget.initChannels)
+            self.multiPointWidget2.signal_acquisition_shape.connect(self.napariMosaicDisplayWidget.initLayersShape)
+            self.multipointController.napari_mosaic_update.connect(self.napariMosaicDisplayWidget.updateMosaic)
+            self.napariMosaicDisplayWidget.signal_coordinates_clicked.connect(self.navigationController.move_from_click_mosaic)
+
+        if ENABLE_STITCHER:
+            self.multipointController.signal_stitcher.connect(self.startStitcher)
+            self.multiPointWidget.signal_stitcher_widget.connect(self.toggleStitcherWidget)
+            self.multiPointWidget.signal_acquisition_channels.connect(self.stitcherWidget.updateRegistrationChannels)
+            self.multiPointWidget.signal_acquisition_z_levels.connect(self.stitcherWidget.updateRegistrationZLevels)
+            self.multiPointWidget2.signal_stitcher_widget.connect(self.toggleStitcherWidget)
+            self.multiPointWidget2.signal_acquisition_channels.connect(self.stitcherWidget.updateRegistrationChannels)
+            self.multiPointWidget2.signal_acquisition_z_levels.connect(self.stitcherWidget.updateRegistrationZLevels)
+
+    def toggleStitcherWidget(self, checked):
+        if checked:
+            self.stitcherWidget.show()
+        else:
+            self.stitcherWidget.hide()
+
+    def startStitcher(self, acquisition_path):
+        acquisitionWidget = self.recordTabWidget.currentWidget()
+        if not hasattr(acquisitionWidget, "checkbox_stitchOutput"):
+            acquisitionWidget = self.multiPointWidget2
+
+        if not acquisitionWidget.checkbox_stitchOutput.isChecked():
+            return
+
+        apply_flatfield = self.stitcherWidget.applyFlatfieldCheck.isChecked()
+        use_registration = self.stitcherWidget.useRegistrationCheck.isChecked()
+        registration_channel = self.stitcherWidget.registrationChannelCombo.currentText()
+        registration_z_level = self.stitcherWidget.registrationZCombo.value()
+        output_name = acquisitionWidget.lineEdit_experimentID.text() or "stitched"
+        output_format = ".ome.zarr" if self.stitcherWidget.outputFormatCombo.currentText() == "OME-ZARR" else ".ome.tiff"
+
+        self.stitcherThread = stitcher.Stitcher(
+            input_folder=acquisition_path,
+            output_name=output_name,
+            output_format=output_format,
+            apply_flatfield=apply_flatfield,
+            use_registration=use_registration,
+            registration_channel=registration_channel,
+            registration_z_level=registration_z_level,
+        )
+
+        self.stitcherWidget.setStitcherThread(self.stitcherThread)
+        self.connectStitcherSignals()
+        self.stitcherThread.start()
+
+    def connectStitcherSignals(self):
+        self.stitcherThread.update_progress.connect(self.stitcherWidget.updateProgressBar)
+        self.stitcherThread.getting_flatfields.connect(self.stitcherWidget.gettingFlatfields)
+        self.stitcherThread.starting_stitching.connect(self.stitcherWidget.startingStitching)
+        self.stitcherThread.starting_saving.connect(self.stitcherWidget.startingSaving)
+        self.stitcherThread.finished_saving.connect(self.stitcherWidget.finishedSaving)
 
     def closeEvent(self, event):
         event.accept()

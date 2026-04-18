@@ -498,6 +498,7 @@ class OctopiGUI(QMainWindow):
                 self.sampleSettingsWidget,
                 self.multiPointWidgetGrid,
             )
+            self.slideScanAcquisitionWidget.signal_display_mode_requested.connect(self.setSlideScanDisplayMode)
 
         if ENABLE_TRACKING:
             self.trackingControlWidget = widgets.TrackingControllerWidget(self.trackingController, self.configurationManager, show_configurations=TRACKING_SHOW_MICROSCOPE_CONFIGURATIONS)
@@ -666,6 +667,9 @@ class OctopiGUI(QMainWindow):
             layout.addWidget(color_group)
             layout.addWidget(stage_group)
             layout.addWidget(self.slideScanAcquisitionWidget)
+            if ENABLE_STITCHER:
+                layout.addWidget(self.stitcherWidget)
+                self.stitcherWidget.hide()
             layout.addWidget(advanced_camera_group)
             layout.addWidget(advanced_focus_group)
             layout.addStretch(1)
@@ -1211,6 +1215,20 @@ class OctopiGUI(QMainWindow):
             self.navigationViewer.on_acquisition_start(acquisition_started)
             self.multiPointWidget2.display_progress_bar(acquisition_started)
 
+    def setSlideScanDisplayMode(self, mode):
+        if not isinstance(self.imageDisplayTabs, QTabWidget):
+            return
+
+        if (
+            mode == "mosaic"
+            and USE_NAPARI_FOR_MOSAIC_DISPLAY
+            and getattr(self, "napariMosaicDisplayWidget", None) is not None
+        ):
+            self.imageDisplayTabs.setCurrentWidget(self.napariMosaicDisplayWidget)
+            return
+
+        self.imageDisplayTabs.setCurrentIndex(0)
+
     def toggleStitcherWidget(self, checked):
         if checked:
             self.stitcherWidget.show()
@@ -1225,30 +1243,40 @@ class OctopiGUI(QMainWindow):
 
     def startStitcher(self, acquisition_path):
         acquisitionWidget = self.multiPointWidgetGrid if self.slideScanWorkflowEnabled else self.recordTabWidget.currentWidget()
-        if acquisitionWidget.checkbox_stitchOutput.isChecked():
-            apply_flatfield = self.stitcherWidget.applyFlatfieldCheck.isChecked()
-            use_registration = self.stitcherWidget.useRegistrationCheck.isChecked()
-            registration_channel = self.stitcherWidget.registrationChannelCombo.currentText()
-            registration_z_level = self.stitcherWidget.registrationZCombo.value()
-            overlap_percent = self.multiPointWidgetGrid.entry_overlap.value()
-            output_name = acquisitionWidget.lineEdit_experimentID.text() or "stitched"
-            output_format = ".ome.zarr" if self.stitcherWidget.outputFormatCombo.currentText() == "OME-ZARR" else ".ome.tiff"
+        if not acquisitionWidget.checkbox_stitchOutput.isChecked():
+            return
 
-            stitcher_class = stitcher.CoordinateStitcher if self.slideScanWorkflowEnabled or self.recordTabWidget.currentIndex() == self.recordTabWidget.indexOf(self.multiPointWidgetGrid) else stitcher.Stitcher
-            self.stitcherThread = stitcher_class(
-                input_folder=acquisition_path,
-                output_name=output_name,
-                output_format=output_format,
-                apply_flatfield=apply_flatfield,
-                overlap_percent=overlap_percent,
-                use_registration=use_registration,
-                registration_channel=registration_channel,
-                registration_z_level=registration_z_level
+        apply_flatfield = self.stitcherWidget.applyFlatfieldCheck.isChecked()
+        use_registration = self.stitcherWidget.useRegistrationCheck.isChecked()
+        registration_channel = self.stitcherWidget.registrationChannelCombo.currentText()
+        registration_z_level = self.stitcherWidget.registrationZCombo.value()
+        output_name = acquisitionWidget.lineEdit_experimentID.text() or "stitched"
+        output_format = ".ome.zarr" if self.stitcherWidget.outputFormatCombo.currentText() == "OME-ZARR" else ".ome.tiff"
+        is_scan_grid = self.slideScanWorkflowEnabled or (
+            ENABLE_SCAN_GRID and self.recordTabWidget.currentIndex() == self.recordTabWidget.indexOf(self.multiPointWidgetGrid)
+        )
+
+        common_kwargs = {
+            "input_folder": acquisition_path,
+            "output_name": output_name,
+            "output_format": output_format,
+            "apply_flatfield": apply_flatfield,
+            "use_registration": use_registration,
+            "registration_channel": registration_channel,
+            "registration_z_level": registration_z_level,
+        }
+
+        if is_scan_grid:
+            self.stitcherThread = stitcher.CoordinateStitcher(
+                overlap_percent=self.multiPointWidgetGrid.entry_overlap.value(),
+                **common_kwargs,
             )
+        else:
+            self.stitcherThread = stitcher.Stitcher(**common_kwargs)
 
-            self.stitcherWidget.setStitcherThread(self.stitcherThread)
-            self.connectStitcherSignals()
-            self.stitcherThread.start()
+        self.stitcherWidget.setStitcherThread(self.stitcherThread)
+        self.connectStitcherSignals()
+        self.stitcherThread.start()
 
     def connectStitcherSignals(self):
         self.stitcherThread.update_progress.connect(self.stitcherWidget.updateProgressBar)

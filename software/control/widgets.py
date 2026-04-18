@@ -2839,6 +2839,8 @@ class SlideScanReferenceMatchWidget(QFrame):
 
 
 class SlideScanAcquisitionWidget(QFrame):
+    signal_display_mode_requested = Signal(str)
+
     def __init__(self, sampleSettingsWidget, scanWidget, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.sampleSettingsWidget = sampleSettingsWidget
@@ -2857,6 +2859,9 @@ class SlideScanAcquisitionWidget(QFrame):
         self.scanWidget.checkbox_genFocusMap.setText("Use Focus Map")
         self.scanWidget.checkbox_hybridAutofocus.setText("Hybrid Focus Correction")
         self.scanWidget.checkbox_stitchOutput.setText("Build One Big Image At End")
+        self.scanWidget.checkbox_stitchOutput.setToolTip(
+            "After scanning finishes, stitch the captured tiles into one big slide image."
+        )
         self.scanWidget.entry_af_interval.setSuffix(" tiles")
         self.scanWidget.list_configurations.setMaximumHeight(96)
         self.scanWidget.list_configurations.setMinimumHeight(72)
@@ -2918,6 +2923,19 @@ class SlideScanAcquisitionWidget(QFrame):
         autofocus_row.addWidget(self.scanWidget.checkbox_hybridAutofocus)
         autofocus_row.addStretch(1)
 
+        big_image_row = QHBoxLayout()
+        big_image_row.addWidget(self.scanWidget.checkbox_stitchOutput)
+        if USE_NAPARI_FOR_MOSAIC_DISPLAY:
+            self.btn_show_live_view = QPushButton("Show Live View")
+            self.btn_show_live_view.setToolTip("Switch the left display back to the live camera view.")
+            self.btn_show_live_view.clicked.connect(lambda: self.signal_display_mode_requested.emit("live"))
+            self.btn_show_big_slide_view = QPushButton("Show Big Slide View")
+            self.btn_show_big_slide_view.setToolTip("Switch the left display to the whole-slide mosaic view.")
+            self.btn_show_big_slide_view.clicked.connect(lambda: self.signal_display_mode_requested.emit("mosaic"))
+            big_image_row.addStretch(1)
+            big_image_row.addWidget(self.btn_show_live_view)
+            big_image_row.addWidget(self.btn_show_big_slide_view)
+
         channels_group = QGroupBox("Scan Channels")
         channels_layout = QVBoxLayout()
         channels_layout.addWidget(self.scanWidget.list_configurations)
@@ -2959,9 +2977,6 @@ class SlideScanAcquisitionWidget(QFrame):
         zstack_row.addWidget(self.scanWidget.entry_Nt)
         advanced_group.content.addLayout(zstack_row)
 
-        if ENABLE_STITCHER:
-            advanced_group.content.addWidget(self.scanWidget.checkbox_stitchOutput)
-
         layout = QVBoxLayout()
         layout.addWidget(title)
         layout.addWidget(hint)
@@ -2974,6 +2989,7 @@ class SlideScanAcquisitionWidget(QFrame):
         layout.addWidget(planner_hint)
         layout.addLayout(planner_row)
         layout.addLayout(autofocus_row)
+        layout.addLayout(big_image_row)
         layout.addWidget(channels_group)
         layout.addLayout(progress_row)
         layout.addLayout(start_row)
@@ -3160,8 +3176,11 @@ class MultiPointWidget(QFrame):
         self.checkbox_withReflectionAutofocus = QCheckBox('Reflection AF')
         self.checkbox_withReflectionAutofocus.setChecked(MULTIPOINT_REFLECTION_AUTOFOCUS_ENABLE_BY_DEFAULT)
 
-        self.checkbox_stitchOutput = QCheckBox('Stitch Scans')
+        self.checkbox_stitchOutput = QCheckBox('Build One Big Image At End')
         self.checkbox_stitchOutput.setChecked(False)
+        self.checkbox_stitchOutput.setToolTip(
+            "After acquisition finishes, stitch the captured tiles into one big slide image."
+        )
 
         self.multipointController.set_reflection_af_flag(MULTIPOINT_REFLECTION_AUTOFOCUS_ENABLE_BY_DEFAULT)
 
@@ -3539,8 +3558,11 @@ class MultiPointWidget2(QFrame):
         self.checkbox_usePiezo = QCheckBox('Piezo Z-Stack')
         self.checkbox_usePiezo.setChecked(MULTIPOINT_USE_PIEZO_FOR_ZSTACKS)
 
-        self.checkbox_stitchOutput = QCheckBox('Stitch Scans')
+        self.checkbox_stitchOutput = QCheckBox('Build One Big Image At End')
         self.checkbox_stitchOutput.setChecked(False)
+        self.checkbox_stitchOutput.setToolTip(
+            "After acquisition finishes, stitch the captured tiles into one big slide image."
+        )
 
         self.checkbox_set_z_range = QCheckBox('Set Z-range')
         self.checkbox_set_z_range.toggled.connect(self.toggle_z_range_controls)
@@ -4472,8 +4494,11 @@ class MultiPointWidgetGrid(QFrame):
         self.checkbox_useCoordinateAcquisition.setChecked(self.use_coordinate_acquisition)
         self.checkbox_useCoordinateAcquisition.stateChanged.connect(lambda state: setattr(self, 'use_coordinate_acquisition', bool(state)))
 
-        self.checkbox_stitchOutput = QCheckBox('Stitch Scans')
+        self.checkbox_stitchOutput = QCheckBox('Build One Big Image At End')
         self.checkbox_stitchOutput.setChecked(False)
+        self.checkbox_stitchOutput.setToolTip(
+            "After scanning finishes, stitch the captured tiles into one big slide image."
+        )
 
         self.btn_startAcquisition = QPushButton('Start\n Acquisition ')
         self.btn_startAcquisition.setCheckable(True)
