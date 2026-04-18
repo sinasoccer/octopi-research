@@ -29,6 +29,14 @@ from control._def import *
 from PIL import Image, ImageDraw, ImageFont
 
 
+SCAN_IMAGE_FORMAT_OPTIONS = [
+    ("JPG", "jpg"),
+    ("PNG", "png"),
+    ("TIFF", "tiff"),
+    ("BMP", "bmp"),
+]
+
+
 class WrapperWindow(QMainWindow):
     def __init__(self, content_widget, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -2878,6 +2886,8 @@ class SlideScanAcquisitionWidget(QFrame):
         saving_row = QHBoxLayout()
         saving_row.addWidget(QLabel("Saving Path"))
         saving_row.addWidget(self.scanWidget.lineEdit_savingDir, 1)
+        saving_row.addWidget(QLabel("Tiles"))
+        saving_row.addWidget(self.scanWidget.dropdown_save_format)
         saving_row.addWidget(self.scanWidget.btn_setSavingDir)
 
         preset_row = QHBoxLayout()
@@ -4324,6 +4334,34 @@ class MultiPointWidgetGrid(QFrame):
         self.setFrameStyle(QFrame.Panel | QFrame.Raised)
         self.set_default_scan_size()
 
+    def _normalize_scan_image_format(self, image_format):
+        normalized = str(image_format or "").strip().lower().lstrip(".")
+        if normalized in ("jpg", "jpeg"):
+            return "jpg"
+        if normalized in ("tif", "tiff"):
+            return "tiff"
+        if normalized in ("png", "bmp"):
+            return normalized
+        return "jpg"
+
+    def _get_initial_scan_image_format(self):
+        current_format = self._normalize_scan_image_format(Acquisition.IMAGE_FORMAT)
+        return "jpg" if current_format == "bmp" else current_format
+
+    def _set_combobox_data(self, widget, value):
+        target_index = widget.findData(value)
+        if target_index < 0:
+            return
+        widget.blockSignals(True)
+        widget.setCurrentIndex(target_index)
+        widget.blockSignals(False)
+
+    def apply_scan_image_format(self, image_format, update_ui=True):
+        normalized = self._normalize_scan_image_format(image_format)
+        Acquisition.IMAGE_FORMAT = normalized
+        if update_ui and hasattr(self, "dropdown_save_format"):
+            self._set_combobox_data(self.dropdown_save_format, normalized)
+
     def add_components(self):
 
         self.entry_well_coverage = QDoubleSpinBox()
@@ -4341,6 +4379,15 @@ class MultiPointWidgetGrid(QFrame):
         self.lineEdit_savingDir.setText(DEFAULT_SAVING_PATH)
         self.multipointController.set_base_path(DEFAULT_SAVING_PATH)
         self.base_path_is_set = True
+
+        self.dropdown_save_format = QComboBox()
+        for label, value in SCAN_IMAGE_FORMAT_OPTIONS:
+            self.dropdown_save_format.addItem(label, value)
+        self.dropdown_save_format.setToolTip(
+            "Tile image format for 8-bit scan saves. JPG is the smallest, PNG is lossless, "
+            "and TIFF is best when you want archival-quality files. 16-bit captures still save as TIFF."
+        )
+        self.apply_scan_image_format(self._get_initial_scan_image_format())
 
         self.lineEdit_experimentID = QLineEdit()
         self.entry_stain = QLineEdit()
@@ -4523,6 +4570,8 @@ class MultiPointWidgetGrid(QFrame):
         saving_path_layout = QHBoxLayout()
         saving_path_layout.addWidget(QLabel('Saving Path'))
         saving_path_layout.addWidget(self.lineEdit_savingDir)
+        saving_path_layout.addWidget(QLabel('Tiles'))
+        saving_path_layout.addWidget(self.dropdown_save_format)
         saving_path_layout.addWidget(self.btn_setSavingDir)
         main_layout.addLayout(saving_path_layout)
 
@@ -4678,6 +4727,9 @@ class MultiPointWidgetGrid(QFrame):
         self.checkbox_rewhite_balance.toggled.connect(self.multipointController.set_rewhite_balance_enabled)
         self.checkbox_usePiezo.toggled.connect(self.multipointController.set_use_piezo)
         self.checkbox_stitchOutput.toggled.connect(self.display_stitcher_widget)
+        self.dropdown_save_format.currentIndexChanged.connect(
+            lambda _: self.apply_scan_image_format(self.dropdown_save_format.currentData(), update_ui=False)
+        )
         self.list_configurations.itemSelectionChanged.connect(self.emit_selected_channels)
         self.navigationViewer.signal_update_live_scan_grid.connect(self.set_live_scan_coordinates)
         self.navigationViewer.signal_update_well_coordinates.connect(self.set_well_coordinates)
@@ -4753,6 +4805,7 @@ class MultiPointWidgetGrid(QFrame):
             ('live_exposure_time_ms', 'exposure'),
             ('live_analog_gain', 'analog gain'),
             ('live_illumination_intensity', 'illumination'),
+            ('scan_image_format', 'tile save format'),
         ]
         missing = [label for key, label in required_fields if key not in preset_data]
 
@@ -4875,6 +4928,7 @@ class MultiPointWidgetGrid(QFrame):
         preset_data = {
             'stain': self.entry_stain.text().strip(),
             'objective': self.objectiveStore.current_objective,
+            'scan_image_format': self.dropdown_save_format.currentData(),
             'scan_size_mm': float(self.entry_scan_size.value()),
             'overlap_percent': float(self.entry_overlap.value()),
             'shape': self.combobox_shape.currentText(),
@@ -4906,6 +4960,7 @@ class MultiPointWidgetGrid(QFrame):
         self.entry_stain.setText(preset_data.get('stain', ''))
         self._set_objective(preset_data.get('objective'))
         self._apply_live_preset_data(preset_data)
+        self.apply_scan_image_format(preset_data.get('scan_image_format', self._get_initial_scan_image_format()))
 
         self.entry_scan_size.setValue(float(preset_data.get('scan_size_mm', self.entry_scan_size.value())))
         self.entry_overlap.setValue(float(preset_data.get('overlap_percent', self.entry_overlap.value())))
